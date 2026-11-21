@@ -1,0 +1,15 @@
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        maven {
+            name = 'MinecraftForge'
+            url = 'https://maven.minecraftforge.net/'
+        }
+    }
+}
+
+// BAMNG ships with a pinned Java 17 toolchain.  The Foojay resolver only
+// discovers a JDK automatically, and its Groovy metadata is incompatible
+// with the portable Temurin 17.0.21 build used by this project.  Avoiding the
+// resolver makes the build deterministic and leaves ForgeGradle responsible
+// for the actual Minecraft toolchain.

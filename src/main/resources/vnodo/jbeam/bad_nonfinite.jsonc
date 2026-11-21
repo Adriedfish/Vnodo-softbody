@@ -1,0 +1,2 @@
+{"nodes":[{"id":"a","x":0,"y":0,"z":0,"mass":2},{"id":"b","x":"NaN","y":0,"z":0,"mass":2}],
+ "beams":[{"a":"a","b":"b"}],"triangles":[]}

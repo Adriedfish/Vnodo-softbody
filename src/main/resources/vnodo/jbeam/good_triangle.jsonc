@@ -1,0 +1,14 @@
+{
+  // minimal closed shell sample
+  "nodes": [
+    {"id":"a","x":0,"y":0,"z":0,"mass":2,"group":"body"},
+    {"id":"b","x":1,"y":0,"z":0,"mass":2,"group":"body"},
+    {"id":"c","x":0,"y":0,"z":1,"mass":2,"group":"body"}
+  ],
+  "beams": [
+    {"a":"a","b":"b","spring":900000,"damp":300,"strength":90000},
+    {"a":"b","b":"c","spring":900000,"damp":300,"strength":90000},
+    {"a":"c","b":"a","spring":900000,"damp":300,"strength":90000}
+  ],
+  "triangles": [{"a":"a","b":"b","c":"c"}]
+}

@@ -1,0 +1,28 @@
+# Gradle / build output
+build/
+.gradle/
+run/
+out/
+*.class
+
+# Local third-party dependencies.
+# Vettura and Vextris are All Rights Reserved and are NOT redistributed here.
+# Put vettura-<version>.jar and vextris-forge-<mc>-<version>.jar into libs/ locally.
+libs/*.jar
+
+# Logs and crash dumps
+*.log
+hs_err_pid*.log
+replay_pid*.log
+
+# IDE
+.idea/
+*.iml
+.eclipse/
+.settings/
+*.launch
+bin/
+
+# OS
+Thumbs.db
+.DS_Store

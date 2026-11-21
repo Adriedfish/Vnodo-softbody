@@ -1,0 +1,18 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.bamng.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "client": [
+    "VnodoDamageInputMixin",
+    "VehicleDamageAccess",
+    "VehicleDentsMixin",
+    "PickupTruckRendererMixin",
+    "MeshGpuCacheMixin",
+    "VetturaRendererRegistrationMixin",
+    "VnodoSettingsMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
