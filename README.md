@@ -4,7 +4,18 @@ Vettura 皮卡的节点式柔体碰撞附属模组。撞击后的凹陷、褶皱
 
 Node-based soft-body crash addon for Vettura pickup trucks: persistent panel deformation, a physical crush field, and collision boxes driven by the deformed shell.
 
-> 版本 **0.7.0-beta** · Minecraft 1.20.1 · Forge 47.x · Java 17
+> 版本 **0.7.1-beta** · Minecraft 1.20.1 · Forge 47.x · Java 17
+
+- 仓库 / 源码：<https://github.com/Adriedfish/Vnodo-softbody>
+- 下载与更新日志：<https://github.com/Adriedfish/Vnodo-softbody/releases>
+- 问题反馈：<https://github.com/Adriedfish/Vnodo-softbody/issues>
+
+## 0.7.1-beta 更新
+
+- 默认物理档从 `hard` 软一档到 `default`：前保险杠 0.80、机盖 0.50、车身 0.70、车斗 0.90、后车身 0.80、尾门 0.70，车轮保持 1.00。
+- 设置页恢复 `default / soft / hard` 三个预设和 7 个区域滑条，拖动即时生效。
+- 旧 0.7.0 的 hard 配置首次加载会自动迁移到新 default，不需要删配置。
+- 包含 auditfix2 的软-软碰撞法线刷新和读档尾部压溃上限修复。
 
 ---
 
@@ -58,9 +69,11 @@ java -cp "build/classes/java/main;build/resources/main;libs/*;tools/probe" Vnodo
 
 末行出现 `BAMNG SUITE OK`、`T15 CRASH OK`、`FRONT SPEED PROBE OK` 即通过。这是无头探针，不等于实机验证。
 
-## 许可
+## 许可与版权（不得删除）
 
 CC BY-NC-SA 4.0。允许免费使用、学习、修改、二次开发、收录进免费整合包；二次分发必须署名并说明改动，衍生作品沿用同一协议；禁止商用与付费整合包；禁止植入恶意代码。详见 `LICENSE.txt`。
+
+**版权与署名（不得删除）**：再分发、整合包、镜像、分支和衍生版本必须保留本 README 的版权与署名段落、`LICENSE.txt` 和 `COPYRIGHT-NOTICE.txt`；不得删除、隐藏、替换或剥离这些文件及署名。删除版权说明视为违反署名要求。
 
 ## 致谢
 

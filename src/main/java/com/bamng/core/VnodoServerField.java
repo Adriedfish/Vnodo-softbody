@@ -23,7 +23,10 @@ public final class VnodoServerField {
     }
 
     public static void put(UUID uuid, int version, float[] field) {
-        if (uuid == null || field == null || field.length == 0) {
+        if (uuid == null) {
+            return;
+        }
+        if (field == null || field.length == 0) {
             FIELDS.remove(uuid);
             return;
         }

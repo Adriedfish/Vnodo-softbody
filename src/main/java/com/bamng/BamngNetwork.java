@@ -1,5 +1,6 @@
 package com.bamng;
 
+import com.antaurora.vettura.vehicle.PickupTruckEntity;
 import com.bamng.entity.SoftBodyVehicleEntity;
 import com.bamng.core.VnodoServerField;
 import net.minecraft.network.FriendlyByteBuf;
@@ -37,6 +38,11 @@ public final class BamngNetwork {
                 .decoder(CollisionFieldMessage::new)
                 .consumerMainThread(CollisionFieldMessage::handle)
                 .add();
+        CHANNEL.messageBuilder(GlassShatterMessage.class, id++, NetworkDirection.PLAY_TO_SERVER)
+                .encoder(GlassShatterMessage::encode)
+                .decoder(GlassShatterMessage::new)
+                .consumerMainThread(GlassShatterMessage::handle)
+                .add();
     }
 
     public static void sendDrive(int entityId, float throttle, float brake, float steer) {
@@ -54,6 +60,44 @@ public final class BamngNetwork {
         }
         CHANNEL.sendToServer(new CollisionFieldMessage(uuid, version,
                 field == null ? new float[0] : field));
+    }
+
+    /**
+     * Shatter Vettura panes through the server copy of the damage record.  The
+     * glass array is part of the synced DAMAGE tag, so calling set() on the
+     * client would be overwritten by the next sync; the server is the only
+     * place that both persists and broadcasts it.
+     */
+    public static void sendGlassShatter(int entityId, int mask) {
+        CHANNEL.sendToServer(new GlassShatterMessage(entityId, mask));
+    }
+
+    public record GlassShatterMessage(int entityId, int mask) {
+        public GlassShatterMessage(FriendlyByteBuf buf) {
+            this(buf.readVarInt(), buf.readUnsignedByte());
+        }
+
+        public void encode(FriendlyByteBuf buf) {
+            buf.writeVarInt(this.entityId);
+            buf.writeByte(this.mask & 0x0F);
+        }
+
+        public void handle(Supplier<NetworkEvent.Context> supplier) {
+            NetworkEvent.Context context = supplier.get();
+            ServerPlayer player = context.getSender();
+            if (player != null && player.level().getEntity(this.entityId)
+                    instanceof com.antaurora.vettura.vehicle.PickupTruckEntity truck
+                    && truck.isAlive()
+                    && BamngSpawnerItem.isSoft(truck)
+                    && player.distanceToSqr(truck) <= 64.0 * 64.0) {
+                for (int pane = 0; pane < 4; pane++) {
+                    if ((this.mask & (1 << pane)) != 0) {
+                        truck.damage().set("glass", pane, 0.0F);
+                    }
+                }
+            }
+            context.setPacketHandled(true);
+        }
     }
 
     public record DriveMessage(int entityId, float throttle, float brake, float steer) {
@@ -116,7 +160,21 @@ public final class BamngNetwork {
 
         public void handle(Supplier<NetworkEvent.Context> supplier) {
             NetworkEvent.Context context = supplier.get();
-            context.enqueueWork(() -> VnodoServerField.put(this.uuid, this.version, this.field));
+            ServerPlayer player = context.getSender();
+            if (player != null) {
+                boolean owned = false;
+                for (PickupTruckEntity truck : player.level().getEntitiesOfClass(
+                        PickupTruckEntity.class, player.getBoundingBox().inflate(64.0),
+                        candidate -> candidate.isAlive()
+                                && candidate.getUUID().equals(this.uuid)
+                                && BamngSpawnerItem.isSoft(candidate))) {
+                    owned = true;
+                    break;
+                }
+                if (owned) {
+                    context.enqueueWork(() -> VnodoServerField.put(this.uuid, this.version, this.field));
+                }
+            }
             context.setPacketHandled(true);
         }
     }

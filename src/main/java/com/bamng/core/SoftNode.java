@@ -39,6 +39,9 @@ public final class SoftNode {
     public boolean wallDented;
     public double wallImpactSpeed;
 
+    /** Last tick a foreign-body impact was converted into permanent damage. */
+    public long foreignImpactTick = Long.MIN_VALUE;
+
     /** Current anchor target in world space. */
     public double targetX;
     public double targetY;

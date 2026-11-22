@@ -34,19 +34,22 @@ public final class VnodoConfig {
     private static final Logger LOG = Logger.getLogger("vnodo");
     private static final VnodoConfig INSTANCE = new VnodoConfig();
     /**
-     * User-requested lock: the in-game sliders and preset buttons may remain
-     * visible for diagnostics, but they must not weaken the physical shell.
-     * The headless -D overrides are still accepted for probes.
+     * Compile-time escape hatch for a deliberately locked demo build.
+     * 0.7.1-beta leaves the profile editable; the old 0.7.0 hard lock is no
+     * longer the release default.
      */
-    public static final boolean PHYSICS_LOCKED = true;
+    public static final boolean PHYSICS_LOCKED = false;
 
-    private final double[] scales = HARD.clone();
+    /** One-time migration marker for the old 0.7.0 hard-locked profile. */
+    private static final int PROFILE_VERSION = 2;
+
+    private final double[] scales = DEFAULTS.clone();
     private Path path = Path.of("config", "vnodo-client.properties");
     private boolean enabled = true;
     private boolean debugHud = true;
     private boolean dirty;
     private String source = "vnodo";
-    private String preset = "hard";
+    private String preset = "default";
 
     private VnodoConfig() {
     }
@@ -183,13 +186,13 @@ public final class VnodoConfig {
     }
 
     public static void reset() {
-        // The user's tested baseline is the hard profile.  Reset therefore
-        // restores the recommended road setup, not the old soft demo profile.
-        System.arraycopy(HARD, 0, INSTANCE.scales, 0, HARD.length);
+        // The 0.7.1 default is one step softer than the old hard lock.
+        // "hard" remains selectable for players who want the tested stiff shell.
+        System.arraycopy(DEFAULTS, 0, INSTANCE.scales, 0, DEFAULTS.length);
         INSTANCE.enabled = true;
         INSTANCE.debugHud = true;
         INSTANCE.source = "vnodo";
-        INSTANCE.preset = "hard";
+        INSTANCE.preset = "default";
         INSTANCE.dirty = false;
         INSTANCE.saveToDisk();
     }
@@ -224,11 +227,12 @@ public final class VnodoConfig {
             LOG.log(Level.WARNING, "Vnodo config read failed: " + this.path, exception);
             return;
         }
+        int profileVersion = parseProfileVersion(properties.getProperty("profile_version"));
         this.enabled = Boolean.parseBoolean(properties.getProperty("enabled", "true"));
         this.debugHud = Boolean.parseBoolean(properties.getProperty("debug_hud", "true"));
         this.source = "vettura".equalsIgnoreCase(properties.getProperty("source", "vnodo"))
                 ? "vettura" : "vnodo";
-        this.preset = properties.getProperty("preset", "hard");
+        this.preset = properties.getProperty("preset", "default");
         for (int i = 0; i < REGIONS.length; i++) {
             String key = "region." + REGIONS[i];
             String raw = properties.getProperty(key);
@@ -244,6 +248,41 @@ public final class VnodoConfig {
             System.arraycopy(HARD, 0, this.scales, 0, HARD.length);
             this.preset = "hard";
         }
+        if (profileVersion < PROFILE_VERSION) {
+            // 0.7.0 wrote a hard-locked config without a profile marker.
+            // Migrate that exact profile once so existing players get the
+            // new default instead of staying stuck on hard. A hand-edited
+            // custom profile from before the lock is preserved.
+            if (isHardLockedProfile()) {
+                System.arraycopy(DEFAULTS, 0, this.scales, 0, DEFAULTS.length);
+                this.preset = "default";
+            }
+            this.dirty = false;
+            this.saveToDisk();
+        }
+    }
+
+    private boolean isHardLockedProfile() {
+        if (!"hard".equals(this.preset)) {
+            return false;
+        }
+        for (int i = 0; i < REGIONS.length; i++) {
+            if (Math.abs(this.scales[i] - HARD[i]) > 1.0e-4) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static int parseProfileVersion(String raw) {
+        if (raw == null || raw.isBlank()) {
+            return 0;
+        }
+        try {
+            return Integer.parseInt(raw.trim());
+        } catch (NumberFormatException ignored) {
+            return 0;
+        }
     }
 
     private void saveToDisk() {
@@ -251,6 +290,7 @@ public final class VnodoConfig {
             return;
         }
         Properties properties = new Properties();
+        properties.setProperty("profile_version", Integer.toString(PROFILE_VERSION));
         properties.setProperty("enabled", Boolean.toString(this.enabled));
         properties.setProperty("debug_hud", Boolean.toString(this.debugHud));
         properties.setProperty("source", this.source);

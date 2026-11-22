@@ -16,7 +16,9 @@ import java.util.List;
  */
 public final class SoftBodySnapshot {
     private static final int MAGIC = 0x42414d47; // "BAMG"
-    private static final int VERSION = 2;
+    /** 2: plastic/rest length only. 3: full beam yield state. 4: beam strength. */
+    private static final int VERSION = 4;
+    private static final int LEGACY_VERSION = 2;
 
     private SoftBodySnapshot() {
     }
@@ -58,6 +60,17 @@ public final class SoftBodySnapshot {
             out.writeDouble(beam.plasticStrain);
             out.writeBoolean(beam.deformed);
             out.writeInt(beam.yieldCount);
+            // Version 3: the yield plateau.  Without these a reload hands every
+            // beam its full undamaged strength again, so the wreck that felt
+            // right on exit turns stiff and mismatched on re-entry.
+            out.writeDouble(beam.maxPosStress);
+            out.writeDouble(beam.maxNegStress);
+            out.writeDouble(beam.foldAccum);
+            out.writeInt(beam.foldEvents);
+            // Version 4: the current beam strength.  Tension yield permanently
+            // lowers it; without this field a reloaded wreck gets its
+            // undamaged strength back and stops breaking where it used to.
+            out.writeDouble(beam.beamStrength);
         }
         List<SoftTriangle> triangles = world.damage.triangles();
         out.writeInt(triangles.size());
@@ -84,7 +97,7 @@ public final class SoftBodySnapshot {
             throw new IOException("not a BAMNG snapshot");
         }
         int version = in.readInt();
-        if (version != VERSION) {
+        if (version < LEGACY_VERSION || version > VERSION) {
             throw new IOException("unsupported snapshot version " + version);
         }
         int bodyId = in.readInt();
@@ -119,6 +132,32 @@ public final class SoftBodySnapshot {
             beam.plasticStrain = in.readDouble();
             beam.deformed = in.readBoolean();
             beam.yieldCount = in.readInt();
+            if (version >= 3) {
+                beam.maxPosStress = in.readDouble();
+                beam.maxNegStress = in.readDouble();
+                beam.foldAccum = in.readDouble();
+                beam.foldEvents = in.readInt();
+            } else {
+                // Legacy saves only carried the shortened rest length.  Rebuild
+                // the yield plateau roughly from the plastic strain so the
+                // reloaded truck is not magically stronger than the one that
+                // was parked.
+                beam.maxPosStress = Math.min(beam.beamStrength * 0.85,
+                        Math.max(beam.maxPosStress,
+                                beam.beamStrength * (1.0 - Math.min(0.60, beam.plasticStrain))));
+            }
+            if (version >= 4) {
+                double savedStrength = in.readDouble();
+                if (Double.isFinite(savedStrength) && savedStrength > 0.0) {
+                    beam.beamStrength = savedStrength;
+                }
+            }
+        }
+        // v2 saves came from the runaway-plasticity build and need the old
+        // length repair.  v3/v4 store exact authored / yielded lengths; clamping
+        // them again on every load changed a legal 5 cm front beam into 10.6 cm.
+        if (version < 3) {
+            sanitizeBeamLengths(world, beams);
         }
         List<SoftTriangle> triangles = world.damage.triangles();
         int triCount = in.readInt();
@@ -130,6 +169,36 @@ public final class SoftBodySnapshot {
             triangle.broken = broken;
             triangle.collision = !broken;
             triangle.aero = !broken;
+        }
+    }
+
+    /**
+     * A v2 save from the runaway-plasticity build stored rest lengths that had
+     * already collapsed to the floor while the node plastic was later clamped
+     * on load.  Restoring both untouched made the shell either slack (rest
+     * length far below the node spacing) or springy.  Keep front crush beams
+     * free to shorten to their authored floor, but stop body/cab beams from
+     * shrinking past 60 % of their authored length.  This repair is only for
+     * v2; v3/v4 already store exact yielded lengths and must round-trip them.
+     */
+    private static void sanitizeBeamLengths(SoftBodyWorld world, List<SoftBeam> beams) {
+        List<SoftNode> nodes = world.nodes;
+        for (SoftBeam beam : beams) {
+            double original = beam.originalRestLength;
+            if (!(original > 1.0e-6)) {
+                continue;
+            }
+            boolean front = false;
+            if (beam.a >= 0 && beam.a < nodes.size()) {
+                front |= "front".equals(nodes.get(beam.a).group0);
+            }
+            if (beam.b >= 0 && beam.b < nodes.size()) {
+                front |= "front".equals(nodes.get(beam.b).group0);
+            }
+            double min = front ? Math.max(0.10, original * 0.20) : original * 0.60;
+            double max = original * 1.60;
+            double length = Double.isFinite(beam.restLength) ? beam.restLength : original;
+            beam.restLength = Math.max(min, Math.min(max, length));
         }
     }
 

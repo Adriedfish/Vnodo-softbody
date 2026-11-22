@@ -87,25 +87,10 @@ public final class VnodoSoftStateStore {
     }
 
     public static long stateHash(SoftBodyWorld world, double frontDepth, double rearDepth) {
-        long hash = 0x9E3779B97F4A7C15L;
-        for (SoftNode node : world.nodes) {
-            hash = mix(hash, Double.doubleToLongBits(node.plasticX));
-            hash = mix(hash, Double.doubleToLongBits(node.plasticY));
-            hash = mix(hash, Double.doubleToLongBits(node.plasticZ));
-            hash = mix(hash, node.wallDented ? 1L : 0L);
-        }
-        List<SoftBeam> beams = world.damage.beams();
-        for (SoftBeam beam : beams) {
-            hash = mix(hash, Double.doubleToLongBits(beam.restLength));
-            hash = mix(hash, Double.doubleToLongBits(beam.plasticStrain));
-            hash = mix(hash, beam.broken ? 1L : 0L);
-            hash = mix(hash, beam.deformed ? 1L : 0L);
-            hash = mix(hash, beam.yieldCount);
-        }
-        List<SoftTriangle> triangles = world.damage.triangles();
-        for (SoftTriangle triangle : triangles) {
-            hash = mix(hash, triangle.broken ? 1L : 0L);
-        }
+        // Damage-only hash: the live positions/velocities change every tick,
+        // and hashing them made a parked-but-moving truck write its snapshot
+        // every 20 ticks even when nothing permanent changed.
+        long hash = world.damageStateHash();
         hash = mix(hash, Double.doubleToLongBits(frontDepth));
         hash = mix(hash, Double.doubleToLongBits(rearDepth));
         return hash;

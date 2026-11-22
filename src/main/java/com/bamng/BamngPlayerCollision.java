@@ -194,7 +194,7 @@ public final class BamngPlayerCollision {
             entity.push(pushX * pushStrength, 0.12, pushZ * pushStrength);
             if (speed > 0.3) {
                 BamngMod.LOGGER.info("BAMNG player contact entity={} speed={} approach={} along={} lateral={}",
-                        entity.getName().getString(), impactSpeed, approach, along, lateral, shoved);
+                        entity.getName().getString(), impactSpeed, approach, along, lateral);
             }
 
             if (!mayHit || impactSpeed < MIN_IMPACT_SPEED || (!bumped && approach < 0.35)) {

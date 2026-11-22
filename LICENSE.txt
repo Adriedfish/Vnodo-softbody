@@ -1,6 +1,13 @@
 Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
 
-Copyright (c) 2026 Vnodo contributors
+Copyright (c) 2026 Adriedfish / Vnodo contributors
+
+COPYRIGHT NOTICE — DO NOT REMOVE
+This LICENSE.txt and COPYRIGHT-NOTICE.txt are part of the distributed work.
+Every redistribution, modpack, mirror, fork, and derivative version must keep
+this file, COPYRIGHT-NOTICE.txt, and the attribution notice in README.md /
+CHANGELOG.md. Do not remove, hide, replace, or strip the copyright notice.
+不得删除本文件或版权说明。
 
 This work is licensed under the Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International License.
 

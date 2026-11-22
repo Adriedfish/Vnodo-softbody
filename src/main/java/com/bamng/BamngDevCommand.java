@@ -23,6 +23,7 @@ public final class BamngDevCommand {
     public static void register(RegisterCommandsEvent event) {
         CommandDispatcher<CommandSourceStack> dispatcher = event.getDispatcher();
         dispatcher.register(Commands.literal("vnodo")
+                .requires(source -> source.hasPermission(2))
                 .then(Commands.literal("driver").executes(context -> {
                     ServerPlayer player = context.getSource().getPlayerOrException();
                     List<PickupTruckEntity> trucks = player.level().getEntitiesOfClass(

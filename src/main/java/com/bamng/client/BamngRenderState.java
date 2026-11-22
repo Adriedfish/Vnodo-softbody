@@ -53,10 +53,15 @@ public final class BamngRenderState {
             SoftNode node = nodes.get(i);
             // Inverse of the model pose above.  The grid, the authored mesh
             // and these rest offsets are all in the same model frame.
-            double dx = node.position.x - truckX;
-            double dz = node.position.z - truckZ;
+            // Capture the authored, undeformed target, not the live node.
+            // After a crash settle the live position already contains the
+            // permanent plastic offset; using it as "rest" cancelled the very
+            // dent the skin was supposed to show (cab/roof folds survived,
+            // nose folds disappeared).
+            double dx = node.targetX - truckX;
+            double dz = node.targetZ - truckZ;
             skin.restX[i] = dx * modelCos - dz * modelSin;
-            skin.restY[i] = node.position.y - truckY;
+            skin.restY[i] = node.targetY - truckY;
             skin.restZ[i] = dx * modelSin + dz * modelCos;
             skin.rigid[i] = node.group0 != null && node.group0.equals("wheel")
                     || node.part != null && node.part.startsWith("tire");

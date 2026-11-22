@@ -85,7 +85,7 @@ public final class SoftBeam {
     /** Maximum accumulated plastic length change as a fraction of L0. */
     public double deformLimit = 0.35;
     /** Fraction of the over-threshold length written into L0 per event. */
-    public double plasticityRate = 0.35;
+    public double plasticityRate = 0.40;
 
     /**
      * Discrete thin-wall buckling.  When foldStep > 0 the beam accumulates
@@ -112,6 +112,9 @@ public final class SoftBeam {
      * Elastic compression still works; only rest-length changes are gated.
      */
     public boolean plasticEnabled = true;
+
+    /** Last tick this beam was settled by applyWallDents (one pass per tick). */
+    public long wallDentTick = Long.MIN_VALUE;
 
     /** Whether force thresholds instead of legacy strain thresholds decide damage. */
     public boolean forceDamage = true;
@@ -503,6 +506,7 @@ public final class SoftBeam {
         yieldCount = 0;
         foldAccum = 0.0;
         foldEvents = 0;
+        wallDentTick = Long.MIN_VALUE;
         deformed = false;
         lastStrain = 0.0;
         lastForce = 0.0;

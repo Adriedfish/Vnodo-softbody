@@ -222,7 +222,7 @@ public final class T15Body {
             beam.beamDamp = 150.0;
             beam.beamDeform = 1_800.0;
             beam.beamStrength = 38_000.0;
-            beam.plasticityRate = 0.65;
+            beam.plasticityRate = 0.60;
             beam.deformLimit = 0.65;
             // Passive group: a broken front beam must not cascade the whole
             // front lattice.  Only beams whose own strain exceeds the limit

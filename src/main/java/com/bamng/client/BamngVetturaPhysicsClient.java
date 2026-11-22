@@ -130,6 +130,9 @@ public final class BamngVetturaPhysicsClient {
 
     /** Vettura's collision input for this truck, or null when Vnodo is off. */
     public static VnodoCollisionField collisionField(PickupTruckEntity truck) {
+        if (!isActive(truck)) {
+            return null;
+        }
         SoftRuntime runtime = RUNTIMES.get(truck);
         return runtime == null ? null : runtime.collisionField;
     }
@@ -153,7 +156,32 @@ public final class BamngVetturaPhysicsClient {
     }
 
     public static boolean isActive(PickupTruckEntity truck) {
-        return VnodoConfig.enabled() && truck != null && RUNTIMES.containsKey(truck);
+        return VnodoConfig.enabled()
+                && "vnodo".equals(VnodoConfig.source())
+                && truck != null
+                && RUNTIMES.containsKey(truck);
+    }
+
+    /**
+     * Stop every client-side shell and clear the server-side collision shadow
+     * that was sent for it.  Clearing RUNTIMES alone left the server field
+     * alive, so switching to Vettura's own shell still fed the old soft hull
+     * into collision and teleported/knocked trucks on the next spawn.
+     */
+    private static void releaseAllShells() {
+        for (Map.Entry<PickupTruckEntity, SoftRuntime> entry : RUNTIMES.entrySet()) {
+            PickupTruckEntity truck = entry.getKey();
+            SoftRuntime runtime = entry.getValue();
+            if (truck == null || runtime == null) {
+                continue;
+            }
+            runtime.saveState(truck, true);
+            if (Minecraft.getInstance().getConnection() != null) {
+                BamngNetwork.sendCollisionField(truck.getUUID(), 0, new float[0]);
+            }
+            BamngRenderState.reset(truck);
+        }
+        RUNTIMES.clear();
     }
 
     @SubscribeEvent
@@ -173,12 +201,13 @@ public final class BamngVetturaPhysicsClient {
         // when no world is loaded, so leaving the world cannot drop the last
         // edit.
         com.bamng.core.VnodoConfig.saveIfDirty();
-        if (!VnodoConfig.enabled()) {
+        if (!VnodoConfig.enabled() || !"vnodo".equals(VnodoConfig.source())) {
             // Keep the last deformed shell on disk before releasing it, so
             // toggling Vnodo back on after a world reload restores the same
-            // crash shape instead of starting from a clean truck.
-            saveAllShells(true);
-            RUNTIMES.clear();
+            // crash shape instead of starting from a clean truck.  The server
+            // shadow must be cleared too; otherwise its stale hull survives
+            // after the client switched back to Vettura.
+            releaseAllShells();
             return;
         }
         Minecraft minecraft = Minecraft.getInstance();
@@ -265,6 +294,11 @@ public final class BamngVetturaPhysicsClient {
                 if (a.distanceToSqr(b) > 8.0 * 8.0) {
                     continue;
                 }
+                // Do not turn spawn correction or the initial anchor pull
+                // into vehicle-to-vehicle damage.
+                if (ra.settleTicks > 0 || rb.settleTicks > 0) {
+                    continue;
+                }
                 // Resolve both directions. resolveForeign() processes this
                 // world's nodes against the other world's surface; a single
                 // call leaves the opposite node/triangle direction unchecked
@@ -310,6 +344,12 @@ public final class BamngVetturaPhysicsClient {
         /** Consecutive near-rest ticks with no box contact. */
         private int stableTicks;
         private boolean crashArmed;
+        /** Bit per VehicleDamage.Pane that Vnodo has already shattered. */
+        private int glassBrokenMask;
+        private final double[] paneOffset = new double[4];
+        private final double[] panePlastic = new double[4];
+        /** How many nodes in each pane's frame are past the bend limit. */
+        private final int[] paneBendCount = new int[4];
 
         /** Real-world frontal crush target in metres, from impact speed. */
         private double crashDent = 0.0;
@@ -579,6 +619,16 @@ public final class BamngVetturaPhysicsClient {
             this.body.world.rigidVelX = shiftX * rigidScale;
             this.body.world.rigidVelY = 0.0;
             this.body.world.rigidVelZ = shiftZ * rigidScale;
+            // Vettura's hull hits the block first and stops the entity, so by
+            // the time the soft shell reaches the wall the shift above is
+            // already down to a few m/s.  Hand over the pre-hit speed so the
+            // wall contact can size its crush from the energy that actually
+            // arrived instead of from the leftover crawl.
+            double approach = this.crashArmed ? Math.max(previousTickSpeed,
+                    this.speedWindowMax()) : 0.0;
+            this.body.world.crashApproachSpeed = teleported ? 0.0 : approach;
+            this.body.world.crashApproachDirX = this.lastDirX;
+            this.body.world.crashApproachDirZ = this.lastDirZ;
             this.body.world.step(0.05, substeps);
 
             this.clampToTruck();
@@ -587,6 +637,7 @@ public final class BamngVetturaPhysicsClient {
             // shape the renderer is about to draw.
             this.collisionField.update(truckX, truckY, truckZ, truckYaw);
             this.syncCollisionField(truck, false);
+            this.updateGlassDamage(truck);
             // A real block contact is stronger evidence than the deceleration
             // proxy.  Vettura normally stops the rigid truck at the wall, but
             // on some ticks the entity has already stopped before the client
@@ -619,34 +670,41 @@ public final class BamngVetturaPhysicsClient {
                 double hitZ = truckZ + (rearHit ? -1.0 : 1.0) * this.lastDirZ * 2.35;
                 this.body.world.damage.setBreakZone(hitX, hitY, hitZ, 1.35,
                         this.breakBudgetFor(impactSpeed), rearHit ? "tailgate" : "front");
-                this.registerCrash(impactSpeed, wallSpeedLoss);
-                if (wallSpeedLoss >= 2.5) {
-                    // Vettura's rigid hull still applies its own BOUNCE after
-                    // the soft-body wall contact.  Kill the outward normal
-                    // component for a few ticks so the hit settles into the
-                    // crush instead of launching the truck back like a ball.
-                    this.reboundNormalX = rearHit
-                            ? this.body.world.lastStepRearWallNormalX
-                            : this.body.world.lastStepFrontWallNormalX;
-                    this.reboundNormalZ = rearHit
-                            ? this.body.world.lastStepRearWallNormalZ
-                            : this.body.world.lastStepFrontWallNormalZ;
-                    this.reboundDampTicks = 8;
+                boolean registered = this.registerCrash(impactSpeed, wallSpeedLoss);
+                if (!registered) {
+                    // Glancing contact: do not push the shell, throw parts,
+                    // log an impact, or start a cooldown that would mask the
+                    // next real hit.
+                    this.body.world.damage.clearBreakZone();
+                } else {
+                    if (wallSpeedLoss >= 2.5) {
+                        // Vettura's rigid hull still applies its own BOUNCE after
+                        // the soft-body wall contact.  Kill the outward normal
+                        // component for a few ticks so the hit settles into the
+                        // crush instead of launching the truck back like a ball.
+                        this.reboundNormalX = rearHit
+                                ? this.body.world.lastStepRearWallNormalX
+                                : this.body.world.lastStepFrontWallNormalX;
+                        this.reboundNormalZ = rearHit
+                                ? this.body.world.lastStepRearWallNormalZ
+                                : this.body.world.lastStepFrontWallNormalZ;
+                        this.reboundDampTicks = 8;
+                    }
+                    if (!rearHit) {
+                        this.pushFront(hitX, hitY, hitZ, this.lastDirX, this.lastDirZ, impactSpeed);
+                    }
+                    BamngMod.LOGGER.info(
+                            "BAMNG impact source={} at {} {} {} speed={} wallImpact={} wallDot={}",
+                            rearHit ? "wall-rear" : "wall-front", hitX, hitY, hitZ,
+                            impactSpeed, rearHit
+                                    ? this.body.world.lastStepRearWallImpact
+                                    : this.body.world.lastStepFrontWallImpact,
+                            rearHit ? rearWallDot : frontWallDot);
+                    double auditDrop = Math.max(windowDrop, wallSpeedLoss);
+                    BamngAuditLog.impact(rearHit ? "wall-rear" : "wall-front",
+                            hitX, hitY, hitZ, speed, impactSpeed, auditDrop);
+                    this.impactCooldown = 12;
                 }
-                if (!rearHit) {
-                    this.pushFront(hitX, hitY, hitZ, this.lastDirX, this.lastDirZ);
-                }
-                BamngMod.LOGGER.info(
-                        "BAMNG impact source={} at {} {} {} speed={} wallImpact={} wallDot={}",
-                        rearHit ? "wall-rear" : "wall-front", hitX, hitY, hitZ,
-                        impactSpeed, rearHit
-                                ? this.body.world.lastStepRearWallImpact
-                                : this.body.world.lastStepFrontWallImpact,
-                        rearHit ? rearWallDot : frontWallDot);
-                double auditDrop = Math.max(windowDrop, wallSpeedLoss);
-                BamngAuditLog.impact(rearHit ? "wall-rear" : "wall-front",
-                        hitX, hitY, hitZ, speed, impactSpeed, auditDrop);
-                this.impactCooldown = 12;
             }
             if (!wallImpact) {
                 // The old proxy was a session-long max: one 60 km/h terrain
@@ -899,10 +957,10 @@ public final class BamngVetturaPhysicsClient {
             return Math.min(32, 8 + (int) speed);
         }
 
-        private void registerCrash(double speed, double speedLoss) {
+        private boolean registerCrash(double speed, double speedLoss) {
             double v = Math.min(120.0, Math.max(0.0, speed));
             if (v < 4.0) {
-                return;
+                return false;
             }
             // Do not derive the visual crush from the entity's speed alone:
             // that is exactly the signal that treated every terrain ledge as a
@@ -914,7 +972,7 @@ public final class BamngVetturaPhysicsClient {
                 // A wall contact that did not actually take 2.5 m/s out of
                 // the truck is a scrape, not a crush.  Do not extend the
                 // crash hot window or throw parts for it.
-                return;
+                return false;
             }
             boolean forward = this.forwardImpact();
             boolean backward = this.backwardImpact();
@@ -956,6 +1014,7 @@ public final class BamngVetturaPhysicsClient {
             // gets the full settlement time.
             this.crashHotTicks = Math.min(120, 20 + (int) (v * 3.0));
             BamngMod.LOGGER.info("BAMNG crash model speed={} targetCrush={}", v, this.crashDent);
+            return true;
         }
 
         /** Record one tick of entity speed and return drop across four ticks. */
@@ -1026,11 +1085,21 @@ public final class BamngVetturaPhysicsClient {
          * collision that would double-count the crash.  Now it only transfers
          * momentum into the contact cube and leaves fracture to the solver.
          */
-        private void pushFront(double hx, double hy, double hz, double dx, double dz) {
+        private void pushFront(double hx, double hy, double hz, double dx, double dz,
+                               double speed) {
             if (this.frontBreakCooldown > 0) {
                 return;
             }
-            double maxD2 = 0.80 * 0.80;
+            // Cover the whole authored front clip (1.1 m), not a 0.8 m ball
+            // around the hit point: the old radius reached 14 nodes and the
+            // 12 cm behind them stayed perfectly straight.
+            double radius = 1.10;
+            double maxD2 = radius * radius;
+            // Use the arrival speed, not this.prevSpeed.  prevSpeed has
+            // already been overwritten with the tick's post-stop crawl (3 m/s
+            // after a 13 m/s hit), so the impulse was 2.4 m/s and the solver
+            // measured literally zero plastic: the truck felt like rebar.
+            double impulse = Math.min(8.0, Math.max(1.2, speed * 0.70));
             for (SoftNode node : this.body.world.nodes) {
                 if ("wheel".equals(node.group0) || "tire".equals(node.group0)) {
                     continue;
@@ -1038,17 +1107,17 @@ public final class BamngVetturaPhysicsClient {
                 double nx = node.position.x - hx;
                 double ny = node.position.y - hy;
                 double nz = node.position.z - hz;
-                if (nx * nx + ny * ny + nz * nz > maxD2) {
+                double d2 = nx * nx + ny * ny + nz * nz;
+                if (d2 > maxD2) {
                     continue;
                 }
-                // Carry the real approach speed into the shell.  The old fixed
-                // 0.35 m/s nudge could not cross the one-metre gap to the wall.
-                double impulse = Math.min(8.0, Math.max(1.2, this.prevSpeed * 0.70));
-                node.velocity.x += dx * impulse;
-                node.velocity.z += dz * impulse;
+                double falloff = 1.0 - Math.sqrt(d2) / radius;
+                node.velocity.x += dx * impulse * falloff;
+                node.velocity.z += dz * impulse * falloff;
             }
             this.frontBreakCooldown = 8;
-            BamngMod.LOGGER.info("BAMNG front impulse at {} {} {} dir={} {}", hx, hy, hz, dx, dz);
+            BamngMod.LOGGER.info("BAMNG front impulse at {} {} {} dir={} {} speed={}",
+                    hx, hy, hz, dx, dz, speed);
         }
 
         private void dampWallRebound(VehiclePhysics physics) {
@@ -1070,14 +1139,201 @@ public final class BamngVetturaPhysicsClient {
             physics.v.z -= nz * vn * 0.85;
         }
 
+        /** A pane cracks once its own frame has bent past a centimetre. */
+        private static final double GLASS_PANE_LIMIT = 0.010;
+        /** ...or once its corner of the shell has taken this much plastic. */
+        private static final double GLASS_PANE_PLASTIC = 0.010;
         /**
-         * Keep the server collision hull fed with the same crush field that
-         * the client renders.  Without this the server-only
-         * PickupTruckEntity.bodyBoxes() kept using Vettura's old field and the
-         * boxes visibly stayed on the undeformed body.  Two-tick cadence is
-         * enough for box following while staying well below the old per-tick
-         * full-lattice upload cost.
+         * A single node drifting is not a bent window frame.  The pane is
+         * carried by a lattice edge, so at least two nodes of that edge have
+         * to be past the limit before the glass can crack.
          */
+        private static final int GLASS_PANE_MIN_NODES = 2;
+
+        /**
+         * Glass is Vettura-owned, so Vnodo never hides panes and never owns
+         * their mesh.  It does own the shell, though, and the panes are drawn
+         * on that shell: a pane is judged by the cab nodes carrying it.  The
+         * judgement only runs while the shell is taking a hit, and needs
+         * either permanent plastic or a whole bent edge, because the raw
+         * spring lag appears during ordinary driving.  Each pane is judged
+         * separately: a nose hit cracks the windscreen, a side swipe cracks
+         * that side, a rear hit cracks the back light.  Bit order matches
+         * VehicleDamage.Pane: FRONT, REAR, LEFT, RIGHT.
+         */
+        private void updateGlassDamage(PickupTruckEntity truck) {
+            if (this.settleTicks > 0 || this.glassBrokenMask == 0x0F) {
+                return;
+            }
+            // paneOffsets() measures the shell's spring lag against the rigid
+            // truck target, and that lag happens on every hard brake, turn and
+            // terrain step: a normal drive already produces 10-30 mm at the
+            // cab.  The old gate accepted any box contact, and a truck driving
+            // past a kerb, fence or step block has those every few ticks, so
+            // panes cracked with plastic=0.000 and no impact at all (the
+            // 12:47 series in the log: front=0.011...0.033, four panes gone in
+            // three seconds of ordinary driving).  A box contact is not a
+            // crash.  Only the confirmed crash window or a real tall-wall hit
+            // may judge glass.
+            boolean impactContext = this.body.world.damageUpdateEnabled
+                    || (this.body.world.lastStepFrontWallContacts > 0
+                            && this.body.world.lastStepFrontWallImpact > 3.0)
+                    || (this.body.world.lastStepRearWallContacts > 0
+                            && this.body.world.lastStepRearWallImpact > 3.0);
+            if (!impactContext) {
+                return;
+            }
+            if (!this.paneOffsets()) {
+                return;
+            }
+            int mask = 0;
+            if (this.paneCracked(0)) {
+                mask |= 1;
+            }
+            if (this.paneCracked(1)) {
+                mask |= 2;
+            }
+            if (this.paneCracked(2)) {
+                mask |= 4;
+            }
+            if (this.paneCracked(3)) {
+                mask |= 8;
+            }
+            mask &= ~this.glassBrokenMask;
+            if (mask == 0) {
+                return;
+            }
+            this.glassBrokenMask |= mask;
+            BamngNetwork.sendGlassShatter(truck.getId(), mask);
+            BamngMod.LOGGER.info(
+                    "BAMNG glass shattered panes={} front={}/{}/{} rear={}/{}/{} left={}/{}/{} right={}/{}/{}",
+                    Integer.bitCount(mask),
+                    String.format(java.util.Locale.ROOT, "%.3f", this.paneOffset[0]),
+                    String.format(java.util.Locale.ROOT, "%.3f", this.panePlastic[0]),
+                    this.paneBendCount[0],
+                    String.format(java.util.Locale.ROOT, "%.3f", this.paneOffset[1]),
+                    String.format(java.util.Locale.ROOT, "%.3f", this.panePlastic[1]),
+                    this.paneBendCount[1],
+                    String.format(java.util.Locale.ROOT, "%.3f", this.paneOffset[2]),
+                    String.format(java.util.Locale.ROOT, "%.3f", this.panePlastic[2]),
+                    this.paneBendCount[2],
+                    String.format(java.util.Locale.ROOT, "%.3f", this.paneOffset[3]),
+                    String.format(java.util.Locale.ROOT, "%.3f", this.panePlastic[3]),
+                    this.paneBendCount[3]);
+        }
+
+        /**
+         * Permanent crush always cracks a pane.  Elastic bend only counts
+         * when several nodes of that pane's frame are past the limit, so one
+         * stray node on the cab roof cannot take out a side window.
+         */
+        private boolean paneCracked(int pane) {
+            return this.panePlastic[pane] > GLASS_PANE_PLASTIC
+                    || (this.paneBendCount[pane] >= GLASS_PANE_MIN_NODES
+                            && this.paneOffset[pane] > GLASS_PANE_LIMIT);
+        }
+
+        /**
+         * Per-pane local deformation: how far the cab nodes carrying a pane
+         * have moved away from their truck-space target.  The target already
+         * contains the rigid transform, so this is shell bend rather than
+         * driving motion, but it still includes elastic spring lag: ordinary
+         * braking and terrain steps produce 10-30 mm here, which is why the
+         * caller must gate it on an actual impact.  Zones: front x-max, rear
+         * x-min, sides split by z over the middle of the cab.
+         */
+        private boolean paneOffsets() {
+            double minX = Double.MAX_VALUE;
+            double maxX = -Double.MAX_VALUE;
+            for (SoftNode node : this.body.world.nodes) {
+                minX = Math.min(minX, node.rest.x);
+                maxX = Math.max(maxX, node.rest.x);
+            }
+            if (!(maxX > minX)) {
+                return false;
+            }
+            double length = Math.max(1.0, maxX - minX);
+            double cabStart = maxX - length * 0.62;
+            double cMinX = Double.MAX_VALUE;
+            double cMaxX = -Double.MAX_VALUE;
+            double cMinY = Double.MAX_VALUE;
+            double cMaxY = -Double.MAX_VALUE;
+            double cMinZ = Double.MAX_VALUE;
+            double cMaxZ = -Double.MAX_VALUE;
+            for (SoftNode node : this.body.world.nodes) {
+                if (!"body".equals(node.group0) || node.rest.x <= cabStart) {
+                    continue;
+                }
+                cMinX = Math.min(cMinX, node.rest.x);
+                cMaxX = Math.max(cMaxX, node.rest.x);
+                cMinY = Math.min(cMinY, node.rest.y);
+                cMaxY = Math.max(cMaxY, node.rest.y);
+                cMinZ = Math.min(cMinZ, node.rest.z);
+                cMaxZ = Math.max(cMaxZ, node.rest.z);
+            }
+            if (!(cMaxX > cMinX)) {
+                return false;
+            }
+            double cabLength = Math.max(1.0, cMaxX - cMinX);
+            double midY = 0.5 * (cMinY + cMaxY);
+            double midZ = 0.5 * (cMinZ + cMaxZ);
+            this.paneOffset[0] = 0.0;
+            this.paneOffset[1] = 0.0;
+            this.paneOffset[2] = 0.0;
+            this.paneOffset[3] = 0.0;
+            this.panePlastic[0] = 0.0;
+            this.panePlastic[1] = 0.0;
+            this.panePlastic[2] = 0.0;
+            this.panePlastic[3] = 0.0;
+            this.paneBendCount[0] = 0;
+            this.paneBendCount[1] = 0;
+            this.paneBendCount[2] = 0;
+            this.paneBendCount[3] = 0;
+            for (SoftNode node : this.body.world.nodes) {
+                if (!"body".equals(node.group0) || node.rest.x <= cabStart || node.rest.y <= midY) {
+                    continue;
+                }
+                double ox = node.position.x - node.targetX;
+                double oy = node.position.y - node.targetY;
+                double oz = node.position.z - node.targetZ;
+                double d = Math.sqrt(ox * ox + oy * oy + oz * oz);
+                double p = Math.sqrt(node.plasticX * node.plasticX
+                        + node.plasticY * node.plasticY + node.plasticZ * node.plasticZ);
+                boolean bent = d > GLASS_PANE_LIMIT;
+                if (node.rest.x > cMaxX - cabLength * 0.22) {
+                    this.paneOffset[0] = Math.max(this.paneOffset[0], d);
+                    this.panePlastic[0] = Math.max(this.panePlastic[0], p);
+                    if (bent) {
+                        this.paneBendCount[0]++;
+                    }
+                }
+                if (node.rest.x < cMinX + cabLength * 0.22) {
+                    this.paneOffset[1] = Math.max(this.paneOffset[1], d);
+                    this.panePlastic[1] = Math.max(this.panePlastic[1], p);
+                    if (bent) {
+                        this.paneBendCount[1]++;
+                    }
+                }
+                if (node.rest.x > cMinX + cabLength * 0.18
+                        && node.rest.x < cMaxX - cabLength * 0.18) {
+                    if (node.rest.z < midZ) {
+                        this.paneOffset[2] = Math.max(this.paneOffset[2], d);
+                        this.panePlastic[2] = Math.max(this.panePlastic[2], p);
+                        if (bent) {
+                            this.paneBendCount[2]++;
+                        }
+                    } else {
+                        this.paneOffset[3] = Math.max(this.paneOffset[3], d);
+                        this.panePlastic[3] = Math.max(this.panePlastic[3], p);
+                        if (bent) {
+                            this.paneBendCount[3]++;
+                        }
+                    }
+                }
+            }
+            return true;
+        }
+
         private void syncCollisionField(PickupTruckEntity truck, boolean force) {
             if (!this.initialized || this.collisionField == null || truck == null) {
                 return;
@@ -1136,12 +1392,14 @@ public final class BamngVetturaPhysicsClient {
             // expects the folds to disappear immediately.
             if (this.repairBodyPending && !bodyPending) {
                 this.resetDamage(truck);
+                this.glassBrokenMask = 0;
             }
             // Keep the old all-jobs fallback for a body job that was already
             // completed before the first check (for example a one-tick repair
             // command).  It is harmless when bodyPending already handled it.
             if (this.repairPending && !pending && !bodyPending) {
                 this.resetDamage(truck);
+                this.glassBrokenMask = 0;
             }
             this.repairBodyPending = bodyPending;
             this.repairPending = pending;
@@ -1164,8 +1422,27 @@ public final class BamngVetturaPhysicsClient {
                         truck.getUUID(), error.toString());
                 return;
             }
-            this.frontCrashDepth = Math.max(0.0, VnodoSoftStateStore.frontDepth(tag));
-            this.rearCrashDepth = Math.max(0.0, VnodoSoftStateStore.rearDepth(tag));
+            // Clamp the plastic the moment it is read: a save written before
+            // the chassis cap existed carries metres of offset, and the first
+            // rendered frame must not show it.  Restore the saved crash
+            // ceilings first; reset() installed the clean 0.72/0.34 defaults,
+            // and capping a 0.46 m tailgate fold with the 0.34 default loses
+            // 0.12 m before the saved front/rear proxy is even assigned.
+            double savedFront = VnodoSoftStateStore.frontDepth(tag);
+            double savedRear = VnodoSoftStateStore.rearDepth(tag);
+            if (!Double.isFinite(savedFront) || savedFront < 0.0) {
+                savedFront = 0.0;
+            } else {
+                savedFront = Math.min(this.body.world.globalPlasticLimit, savedFront);
+            }
+            if (!Double.isFinite(savedRear) || savedRear < 0.0) {
+                savedRear = 0.0;
+            } else {
+                savedRear = Math.min(this.body.world.globalPlasticLimit, savedRear);
+            }
+            this.body.world.restoreSavedCrushLimits(savedFront, savedRear);
+            this.frontCrashDepth = savedFront;
+            this.rearCrashDepth = savedRear;
             this.crashDent = 0.0;
             double maxPlastic = 0.0;
             double maxFront = 0.0;
@@ -1504,6 +1781,7 @@ public final class BamngVetturaPhysicsClient {
             this.lastTruckYaw = truck.getYRot();
             this.loadSavedState(truck);
             this.settleTicks = 20;
+            this.glassBrokenMask = 0;
             BamngMod.LOGGER.info("BAMNG attach base com={},{},{} body={},{},{} spawnYaw={}",
                     this.comBaseX, this.comBaseY, this.comBaseZ,
                     this.bodyBaseX, this.bodyBaseY, this.bodyBaseZ, this.spawnYaw);

@@ -66,6 +66,9 @@ public final class SoftBodyWorld {
     public double groundY = 0.0;
     public double groundFriction = 0.62;
     public GroundMaterial groundMaterial = GroundMaterial.DEFAULT;
+
+    /** Scratch for the per-substep tunnel sweep; the solver is single-threaded. */
+    private final double[] sweepStep = new double[3];
     public double gravityScale = 1.0;
     public double globalDamping = 0.020;
     public double contactWarmStart = 0.5;
@@ -159,6 +162,16 @@ public final class SoftBodyWorld {
     private static final double PLASTIC_MIN_NORMAL_SPEED = 1.2;
     /** Whole-vehicle envelope, replaced by VehicleBody from layout size. */
     public double globalPlasticLimit = Double.POSITIVE_INFINITY;
+
+    /**
+     * Permanent plastic ceiling for the chassis/cab shell.  The crash ceilings
+     * only bound the authored crush panels; body beams run the continuous
+     * plasticity path, and before this cap a single impact could flow the cab
+     * nodes all the way to the whole-vehicle envelope (3.1 m), which the
+     * renderer draws as black spikes.  0.30 m is more than a 20 % cab collapse
+     * and still keeps the shell a truck.
+     */
+    public double chassisPlasticLimit = 0.30;
     /** Local-space rest extents, used for layered force attenuation. */
     private double minRestX = Double.POSITIVE_INFINITY;
     private double maxRestX = -Double.POSITIVE_INFINITY;
@@ -179,13 +192,39 @@ public final class SoftBodyWorld {
      *  run once per tick for a condition that cannot change until the shell
      *  actually touches something. */
     public boolean damageUpdateEnabled = false;
+
+    /** Damage-window state from the previous tick, for the falling edge. */
+    private boolean damageWindowWasOpen = false;
     /**
      * Set by the client before {@link #step}: the truck has finished spawning
      * and a tall wall contact is allowed to write plastic on its first tick,
      * even though the crash hot window has not opened yet.
      */
     public boolean crashGateArmed = false;
+    /**
+     * Speed the truck was actually carrying when it reached the wall, plus
+     * the direction it was moving.  Vettura resolves its rigid hull against
+     * the block before the soft step runs, so by the time a node touches the
+     * wall the entity has already been stopped and {@link #rigidVel} carries
+     * only the residual 2-3 m/s.  Judging the crush from that residual made a
+     * 47 km/h hit register as a 3 m/s tap and produced a 5 cm dent.  The
+     * client therefore hands the pre-hit speed in here; it is applied only
+     * along the wall normal and only when a tall wall is actually touched.
+     */
+    public double crashApproachSpeed = 0.0;
+    public double crashApproachDirX = 0.0;
+    public double crashApproachDirZ = 0.0;
     private boolean wallContactThisStep = false;
+    /**
+     * Beam-level wall settlement is a one-shot per crash event.  The narrow
+     * phase re-flags the same nodes every tick while the truck is resting on
+     * the wall; without this guard a long contact kept shortening the same
+     * beams until the 5 cm floor, even though the panel plastic was already
+     * capped.
+     */
+    private boolean wallDentAppliedThisEvent = false;
+    /** Total permanent displacement allowed for foreign-body contacts per tick. */
+    private double foreignDamageBudget = 0.25;
     /** Per-crash plastic ceiling for the authored front/rear panels.  The
      *  old solver added up to 6 cm per node per tick for as long as the
      *  crash window stayed open.  A truck resting against the wall after
@@ -312,6 +351,31 @@ public final class SoftBodyWorld {
         lastStepFrontWallSpeedLoss = 0.0;
         lastStepRearWallSpeedLoss = 0.0;
         plasticTick++;
+        this.foreignDamageBudget = 0.25;
+        // Falling edge of the crash window: freeze the offset the anchored
+        // cab/body actually reached.  Otherwise the anchor spring returns the
+        // panel to its authored position the moment the window closes, which
+        // is what made the in-session result look rubbery while a world reload
+        // (rest shape + plastic only) looked correct.
+        if (this.damageWindowWasOpen && !this.damageUpdateEnabled) {
+            bakeAnchoredOffsets(0.85);
+            // A closed window ends the current crush event.  The next wall
+            // contact may settle beams again, but it must not inherit the
+            // one-shot guard from the previous crash.
+            this.wallDentAppliedThisEvent = false;
+        }
+        boolean hadWallContactLastStep = this.wallContactThisStep;
+        if (this.damageUpdateEnabled && !this.damageWindowWasOpen
+                && this.panelPlasticDepth < 0.02) {
+            // Rising edge with no preceding first-contact dent: this is a new
+            // crash event, so allow one beam settlement pass.
+            this.wallDentAppliedThisEvent = false;
+        }
+        if (!this.damageUpdateEnabled && !hadWallContactLastStep) {
+            // A low-speed first touch that never opened a window is over.
+            this.wallDentAppliedThisEvent = false;
+        }
+        this.damageWindowWasOpen = this.damageUpdateEnabled;
         lastSubsteps = substeps;
         wallContactThisStep = false;
         // Rest-length folding is permanent damage.  It is enabled only for
@@ -351,6 +415,21 @@ public final class SoftBodyWorld {
         }
         if (triangleCollision) {
             updateTriangleSleep(array);
+        }
+    }
+
+    /**
+     * Refresh cached triangle normals/areas from the current node positions.
+     * The client disables triangle collision for the shell, so step()
+     * skips this pass; vehicle-to-vehicle contacts still need the other body's
+     * surface to follow its deformed nodes.
+     */
+    public void refreshTriangleGeometry() {
+        SoftNode[] array = nodeArray();
+        for (SoftTriangle triangle : triangles) {
+            if (!triangle.broken) {
+                triangle.updateGeometry(array);
+            }
         }
     }
 
@@ -469,9 +548,26 @@ public final class SoftBodyWorld {
                 node.velocity.y *= factor;
                 node.velocity.z *= factor;
             }
-            node.position.x += node.velocity.x * h;
-            node.position.y += node.velocity.y * h;
-            node.position.z += node.velocity.z * h;
+            double stepX = node.velocity.x * h;
+            double stepY = node.velocity.y * h;
+            double stepZ = node.velocity.z * h;
+            // Explicit integration can leap clean over a one-block wall: at
+            // 28 m/s with six substeps a node travels 0.23 m per step, wider
+            // than the 0.125 m blocks the client feeds in.  Sweep only the
+            // fast nodes and stop them on the wall face instead, otherwise the
+            // nose ends up inside the wall base with the engine under the road.
+            if (!this.collisionBoxes.isEmpty() && node.staticCollisionEnabled()) {
+                double travel = Math.sqrt(stepX * stepX + stepY * stepY + stepZ * stepZ);
+                if (travel > 0.05) {
+                    sweepRigidFollow(node, stepX, stepY, stepZ, this.sweepStep);
+                    stepX = this.sweepStep[0];
+                    stepY = this.sweepStep[1];
+                    stepZ = this.sweepStep[2];
+                }
+            }
+            node.position.x += stepX;
+            node.position.y += stepY;
+            node.position.z += stepZ;
         }
 
         // Damage keeps the original every-other-substep cadence so an impact
@@ -642,13 +738,14 @@ public final class SoftBodyWorld {
         double dy = ty - node.position.y;
         double dz = tz - node.position.z;
         double d2 = dx * dx + dy * dy + dz * dz;
-        if (d2 > 4.0) {
+        if (d2 > 0.64) {
             // Only chassis anchors take this recovery path.  A core node
-            // displaced by more than two metres is not a plausible elastic
-            // state; allowing its capped spring to pull it back over many
-            // ticks injects energy into the lattice and makes the body whip.
-            // Crumple-zone nodes are intentionally unanchored and retain the
-            // separate 10 m collision/plastic envelope.
+            // dragged more than 0.8 m from its target is not a plausible
+            // elastic state; the old 2 m threshold let a collapsed beam pull
+            // cab nodes nearly two metres out and the renderer drew the mesh
+            // as black spikes.  Crumple-zone nodes are intentionally
+            // unanchored and retain the separate 10 m collision/plastic
+            // envelope.
             node.position.set(tx, ty, tz);
             node.previous.set(node.position);
             node.velocity.set(0.0, 0.0, 0.0);
@@ -769,23 +866,34 @@ public final class SoftBodyWorld {
             // speed had vnBefore≈0 and never armed crash plastic.
             double rigidClosing = -(this.rigidVelX * nx + this.rigidVelY * ny
                     + this.rigidVelZ * nz);
-            double impactSpeed = Math.max(0.0, Math.max(-vnBefore, rigidClosing));
-            // A tall face with a mostly horizontal normal is a wall.  The top
-            // of a terrain step is typically one block; requiring the face to
-            // rise at least 1.2 blocks above the ground keeps a one-block kerb
-            // from being promoted to a wall while still accepting the upper
-            // block of a real two-block wall.  The old "0.6 above this node"
-            // test rejected the tailgate: its nodes sit near the top of a
-            // three-block barrier, so a reverse hit found contacts but never
-            // a wall face and therefore never wrote rear crush.
+            // Vettura resolves its rigid hull against the block before this
+            // step runs, so by the time the shell touches the wall the entity
+            // has already stopped and rigidVel only carries the residual
+            // 2-3 m/s.  Use the speed the truck actually arrived with, signed
+            // along this contact normal, so a 47 km/h hit is not recorded as
+            // a 3 m/s tap.
+            double approachClosing = -(this.crashApproachDirX * nx
+                    + this.crashApproachDirZ * nz) * this.crashApproachSpeed;
+            double impactSpeed = Math.max(0.0, Math.max(-vnBefore,
+                    Math.max(rigidClosing, approachClosing)));
+            // A tall face with a mostly horizontal normal is a wall.  A
+            // one-block wall top is groundY+1.0; the old 1.20 threshold
+            // rejected it and made a one-block test wall look like it never
+            // dented.  A terrain step's top face is still excluded by ny.
             boolean wallFace = Math.abs(ny) < 0.30
-                    && box.maxY > this.groundY + 1.20;
+                    && box.maxY > this.groundY + 0.75;
             // First-tick wall damage.  The client only opens the crash hot
             // window after it sees the wall marker, one tick too late for the
             // first contact.  This flag lets the same step that resolves the
-            // wall also write the initial local plastic, so the nose does not
-            // stay rigid and return all the energy as a rebound.
-            boolean wallCrashContact = wallFace && this.crashGateArmed && impactSpeed > 1.2;
+            // wall also write the initial local plastic -- but only for a
+            // genuinely fast approach.  crashGateArmed is a long-lived
+            // "detector enabled" flag, not a crash window; using it alone let
+            // a 1.3 m/s wall touch write permanent plastic.
+            boolean firstWallTouch = this.crashGateArmed
+                    && this.crashApproachSpeed > 8.0;
+            boolean wallCrashContact = wallFace
+                    && (this.damageUpdateEnabled || firstWallTouch)
+                    && impactSpeed > 1.2;
             if (wallCrashContact) {
                 wallContactThisStep = true;
             }
@@ -809,7 +917,7 @@ public final class SoftBodyWorld {
             // low top face of a terrain step.  Record its closing speed so the
             // client can accept a real wall hit even when Vettura has already
             // stopped the rigid entity and the per-tick speed drop is small.
-            if (wallFace && impactSpeed > 2.0) {
+            if (wallFace && impactSpeed > PLASTIC_MIN_NORMAL_SPEED) {
                 double speedLoss = Math.max(0.0, impactSpeed - Math.max(0.0, vn));
                 if (isFrontCrushGroup(node)) {
                     lastFrontWallContacts++;
@@ -1018,9 +1126,15 @@ public final class SoftBodyWorld {
             out[2] = dz;
             return;
         }
-        // Leave a sub-millimetre gap so resolveBoxes() sees a closing contact
-        // next substep instead of a point already buried behind the face.
-        double t = Math.max(0.0, bestT - 1.0e-4);
+        // Stop inside the expanded face by a few millimetres.  resolveBoxes()
+        // only counts a contact when the node centre is closer than radius +
+        // thickness, and a one-micron overlap was eaten by the very first
+        // solver correction: the node sat exactly on the boundary, dist >= r
+        // failed, and the wall never registered.  Five millimetres is far
+        // below anything visible but survives the solver's own displacement.
+        double len = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        double pad = len > 1.0e-9 ? 0.005 / len : 0.0;
+        double t = Math.min(1.0, Math.max(0.0, bestT + pad));
         out[0] = dx * t;
         out[1] = dy * t;
         out[2] = dz * t;
@@ -1075,18 +1189,73 @@ public final class SoftBodyWorld {
         return isFrontCrushGroup(node) || isRearCrushGroup(node);
     }
 
+    /**
+     * Convert a fast foreign-soft-body overlap into a permanent local dent.
+     * The wall path uses rest-length settlement; foreign bodies do not have
+     * a wall normal/marker, so this writes a small node plastic offset and
+     * shortens the incident beams inside the same per-beam deform limit.
+     */
+    private void applyForeignImpact(SoftNode node, double nx, double ny, double nz,
+                                    double closingSpeed) {
+        if (node == null || node.foreignImpactTick == this.plasticTick
+                || this.foreignDamageBudget <= 1.0e-9) {
+            return;
+        }
+        if ("wheel".equals(node.group0) || "tire".equals(node.group0)
+                || (node.part != null && node.part.startsWith("tire"))) {
+            return;
+        }
+        double amount = Math.min(0.08, Math.max(0.0, (closingSpeed - 2.5) * 0.012));
+        amount = Math.min(amount, this.foreignDamageBudget);
+        if (amount <= 1.0e-6) {
+            return;
+        }
+        // The normal points from the foreign surface toward this node; moving
+        // against it is an inward dent on this shell.
+        node.plasticX -= nx * amount;
+        node.plasticY -= ny * amount;
+        node.plasticZ -= nz * amount;
+        node.foreignImpactTick = this.plasticTick;
+        this.foreignDamageBudget -= amount;
+        ensureBeamIncidence();
+        java.util.List<SoftBeam> incident = beamIncidence.get(node.index);
+        if (incident == null) {
+            return;
+        }
+        for (SoftBeam beam : incident) {
+            if (beam.broken) {
+                continue;
+            }
+            double deformLimit = Math.max(0.0, Math.min(1.0, beam.deformLimit));
+            double floor = Math.max(0.05, beam.originalRestLength * (1.0 - deformLimit));
+            double available = beam.restLength - floor;
+            if (available <= 1.0e-9) {
+                continue;
+            }
+            double shorten = Math.min(amount * 0.35, available);
+            beam.restLength -= shorten;
+            beam.plasticStrain += shorten;
+            beam.deformed = true;
+            beam.yieldCount++;
+        }
+    }
+
     private void applyWallDents(SoftNode[] array) {
         ensureBeamIncidence();
         // Wall denting is part of damage settlement, not ordinary suspension
         // contact.  While the confirmed-crash window is closed, discard stale
         // per-node flags so a parked truck cannot keep shortening beams.
         if (!this.damageUpdateEnabled && !this.wallContactThisStep) {
-            for (SoftNode node : array) {
-                node.wallDented = false;
-                node.wallImpactSpeed = 0.0;
-            }
+            clearWallDentFlags(array);
             return;
         }
+        if (this.wallDentAppliedThisEvent) {
+            // The panel plastic is already capped; a second beam pass on a
+            // sustained contact only drives rest lengths to the floor.
+            clearWallDentFlags(array);
+            return;
+        }
+        boolean applied = false;
         for (SoftNode node : array) {
             if (!node.wallDented) {
                 continue;
@@ -1117,7 +1286,7 @@ public final class SoftBodyWorld {
             double layerWeight = Math.max(0.35, 1.0 - layer * 2.2);
             double sag = 0.0;
             for (SoftBeam beam : incident) {
-                if (beam.broken) {
+                if (beam.broken || beam.wallDentTick == this.plasticTick) {
                     continue;
                 }
                 double length = beam.currentLength(array);
@@ -1125,15 +1294,27 @@ public final class SoftBodyWorld {
                 if (compression <= 0.004) {
                     continue;
                 }
+                // applyPlasticFlow caps a beam at original*(1-deformLimit),
+                // but this wall path used to ignore the field and shorten to
+                // an absolute 5 cm.  Keep the authored floor and the absolute
+                // 5 cm lower bound.
+                double deformLimit = Math.max(0.0, Math.min(1.0, beam.deformLimit));
+                double floor = Math.max(0.05, beam.originalRestLength * (1.0 - deformLimit));
+                double available = beam.restLength - floor;
+                if (available <= 1.0e-9) {
+                    continue;
+                }
                 double crush = (0.008 + compression * 0.55) * layerWeight;
-                crush = Math.min(crush, beam.restLength - 0.05);
+                crush = Math.min(crush, available);
                 if (crush <= 1.0e-9) {
                     continue;
                 }
-                beam.restLength = Math.max(0.05, beam.restLength - crush);
+                beam.restLength = Math.max(floor, beam.restLength - crush);
+                beam.wallDentTick = this.plasticTick;
                 beam.deformed = true;
                 beam.plasticStrain += crush;
                 sag += crush;
+                applied = true;
             }
             // The wall-dent path must curve too.  Previously it only shortened
             // rest lengths, so the render read as a flat rearward shove.  Put
@@ -1141,9 +1322,20 @@ public final class SoftBodyWorld {
             // same sign and the front becomes a continuous banana.
             if (sag > 0.0 && "front".equals(node.group0)) {
                 node.plasticY -= Math.min(0.12, sag * 0.45);
-            } else if (sag > 0.0 && "rear".equals(node.group0)) {
+            } else if (sag > 0.0 && ("tailgate".equals(node.group0)
+                    || "rear".equals(node.group0))) {
                 node.plasticY += Math.min(0.08, sag * 0.35);
             }
+        }
+        if (applied) {
+            this.wallDentAppliedThisEvent = true;
+        }
+    }
+
+    private static void clearWallDentFlags(SoftNode[] array) {
+        for (SoftNode node : array) {
+            node.wallDented = false;
+            node.wallImpactSpeed = 0.0;
         }
     }
 
@@ -1203,6 +1395,19 @@ public final class SoftBodyWorld {
         return this.panelFrontDepth;
     }
 
+    /** Restore front/rear ceilings from a saved crash depth before capping. */
+    public void restoreSavedCrushLimits(double frontDepth, double rearDepth) {
+        double ceiling = this.globalPlasticLimit > 0.0
+                ? this.globalPlasticLimit : Double.MAX_VALUE;
+        double front = Double.isFinite(frontDepth) && frontDepth > 0.0
+                ? Math.min(ceiling, frontDepth) : 0.0;
+        double rear = Double.isFinite(rearDepth) && rearDepth > 0.0
+                ? Math.min(ceiling, rearDepth) : 0.0;
+        setCrushPlasticLimits(
+                Math.max(this.frontPlasticLimit, front),
+                Math.max(this.rearPlasticLimit, rear));
+    }
+
     /** Set the permanent plastic ceiling for this crash event.  This is the
      *  same depth the authored skin uses, so the panel cannot be translated
      *  deeper than the visible crush. */
@@ -1223,7 +1428,8 @@ public final class SoftBodyWorld {
         for (SoftNode node : this.nodes) {
             double limit = isFrontCrushGroup(node)
                     ? this.frontPlasticLimit
-                    : isRearCrushGroup(node) ? this.rearPlasticLimit : this.globalPlasticLimit;
+                    : isRearCrushGroup(node) ? this.rearPlasticLimit
+                    : Math.min(this.globalPlasticLimit, this.chassisPlasticLimit);
             double d = Math.sqrt(node.plasticX * node.plasticX
                     + node.plasticY * node.plasticY
                     + node.plasticZ * node.plasticZ);
@@ -1237,6 +1443,48 @@ public final class SoftBodyWorld {
     }
 
     /**
+     * Freeze the current offset of anchored nodes into their permanent plastic
+     * field.  Called on the falling edge of the crash window so the crush stays
+     * where the impact left it instead of springing back out.
+     */
+    public void bakeAnchoredOffsets(double factor) {
+        double f = Math.max(0.0, Math.min(1.0, factor));
+        if (f <= 0.0) {
+            return;
+        }
+        for (SoftNode node : this.nodes) {
+            if (!node.anchored) {
+                continue;
+            }
+            double ex = node.position.x - (node.targetX + node.plasticX);
+            double ey = node.position.y - (node.targetY + node.plasticY);
+            double ez = node.position.z - (node.targetZ + node.plasticZ);
+            double d = Math.sqrt(ex * ex + ey * ey + ez * ez);
+            if (d < 1.0e-4 || d > 0.30) {
+                continue;
+            }
+            double perNode = Math.min(f, 0.10 / d);
+            double px = node.plasticX + ex * perNode;
+            double py = node.plasticY + ey * perNode;
+            double pz = node.plasticZ + ez * perNode;
+            double limit = node.plasticLimit;
+            if (limit > 0.0 && limit < Double.MAX_VALUE) {
+                double len = Math.sqrt(px * px + py * py + pz * pz);
+                if (len > limit && len > 1.0e-9) {
+                    double s = limit / len;
+                    px *= s;
+                    py *= s;
+                    pz *= s;
+                }
+            }
+            node.plasticX = px;
+            node.plasticY = py;
+            node.plasticZ = pz;
+        }
+        capCrushPlastic();
+    }
+
+    /**
      * One cheap smoothing pass over the authored front crush nodes.  A fold
      * event writes both endpoints directly; without relaxation, neighbouring
      * beams can leave one node behind and the seam reads as a knife cut.
@@ -1244,6 +1492,12 @@ public final class SoftBodyWorld {
      * boxes keep their exact contact position.
      */
     private void relaxFoldSeams() {
+        // Seam smoothing is part of the crash window.  Running it forever
+        // after panelFrontDepth crossed 0.02 kept diffusing plastic, changing
+        // the saved state hash and making the truck slowly soften while parked.
+        if (!this.damageUpdateEnabled) {
+            return;
+        }
         if (this.panelFrontDepth < 0.02 || this.beamIncidence == null) {
             return;
         }
@@ -1284,6 +1538,13 @@ public final class SoftBodyWorld {
     public int resolveForeign(SoftBodyWorld other) {
         if (other == null || other == this) {
             return 0;
+        }
+        // The client shell runs with triangleCollision=false.  Its step() then
+        // does not refresh triangle normals, so a deformed truck still presents
+        // the spawn surface to another Vnodo body.  Refresh the foreign surface
+        // before the narrow phase; this is a read-only geometric update.
+        if (!other.triangleCollision && other.airDensity <= 0.0) {
+            other.refreshTriangleGeometry();
         }
         SoftNode[] mine = nodeArray();
         SoftNode[] theirs = other.nodeArray();
@@ -1330,7 +1591,15 @@ public final class SoftBodyWorld {
                 a.position.x -= nx * pa; a.position.y -= ny * pa; a.position.z -= nz * pa;
                 b.position.x -= nx * pb; b.position.y -= ny * pb; b.position.z -= nz * pb;
                 c.position.x -= nx * pc; c.position.y -= ny * pc; c.position.z -= nz * pc;
-                double vn = node.velocity.x * nx + node.velocity.y * ny + node.velocity.z * nz;
+                double triVx = (theirs[triangle.a].velocity.x
+                        + theirs[triangle.b].velocity.x + theirs[triangle.c].velocity.x) / 3.0;
+                double triVy = (theirs[triangle.a].velocity.y
+                        + theirs[triangle.b].velocity.y + theirs[triangle.c].velocity.y) / 3.0;
+                double triVz = (theirs[triangle.a].velocity.z
+                        + theirs[triangle.b].velocity.z + theirs[triangle.c].velocity.z) / 3.0;
+                double vn = (node.velocity.x - triVx) * nx
+                        + (node.velocity.y - triVy) * ny
+                        + (node.velocity.z - triVz) * nz;
                 if (vn < 0.0) {
                     node.velocity.x -= nx * vn * (wNode / total);
                     node.velocity.y -= ny * vn * (wNode / total);
@@ -1344,6 +1613,15 @@ public final class SoftBodyWorld {
                     c.velocity.x += nx * vn * (c.inverseMass / total);
                     c.velocity.y += ny * vn * (c.inverseMass / total);
                     c.velocity.z += nz * vn * (c.inverseMass / total);
+                }
+                // Vehicle-to-vehicle and foreign-soft-body contacts had no
+                // damage channel: the solver pushed the shells apart and
+                // zeroed normal velocity, but nothing permanent was written.
+                // Only a real closing speed creates a dent, and the per-tick
+                // budget prevents a full overlapping shell from folding every
+                // node at once.
+                if (-vn > 2.5) {
+                    applyForeignImpact(node, nx, ny, nz, -vn);
                 }
                 hits++;
             }
@@ -1649,6 +1927,7 @@ public final class SoftBodyWorld {
             node.plasticZ = 0.0;
             node.wallDented = false;
             node.wallImpactSpeed = 0.0;
+            node.foreignImpactTick = Long.MIN_VALUE;
             node.plasticTick = Long.MIN_VALUE;
             node.plasticTickAmount = 0.0;
             node.position.set(node.targetX, node.targetY, node.targetZ);
@@ -1698,8 +1977,36 @@ public final class SoftBodyWorld {
         // A fresh/reset world starts with damage settlement closed until the
         // client arms a confirmed crash window.
         this.damageUpdateEnabled = false;
+        this.damageWindowWasOpen = false;
         this.crashGateArmed = false;
         this.wallContactThisStep = false;
+        this.wallDentAppliedThisEvent = false;
+    }
+
+    /** Damage-only hash used by the save layer; ignores live motion. */
+    public long damageStateHash() {
+        long hash = 0x9E3779B97F4A7C15L;
+        for (SoftNode node : nodes) {
+            hash = mix(hash, Double.doubleToLongBits(node.plasticX));
+            hash = mix(hash, Double.doubleToLongBits(node.plasticY));
+            hash = mix(hash, Double.doubleToLongBits(node.plasticZ));
+        }
+        for (SoftBeam beam : beams) {
+            hash = mix(hash, beam.broken ? 1L : 0L);
+            hash = mix(hash, Double.doubleToLongBits(beam.restLength));
+            hash = mix(hash, Double.doubleToLongBits(beam.plasticStrain));
+            hash = mix(hash, Double.doubleToLongBits(beam.beamStrength));
+            hash = mix(hash, Double.doubleToLongBits(beam.maxPosStress));
+            hash = mix(hash, Double.doubleToLongBits(beam.maxNegStress));
+            hash = mix(hash, Double.doubleToLongBits(beam.foldAccum));
+            hash = mix(hash, beam.foldEvents);
+            hash = mix(hash, beam.deformed ? 1L : 0L);
+            hash = mix(hash, beam.yieldCount);
+        }
+        for (SoftTriangle triangle : triangles) {
+            hash = mix(hash, triangle.broken ? 1L : 0L);
+        }
+        return hash;
     }
 
     /** F6: deterministic state hash over positions, velocities and topology. */
@@ -1720,6 +2027,11 @@ public final class SoftBodyWorld {
             hash = mix(hash, beam.broken ? 1L : 0L);
             hash = mix(hash, Double.doubleToLongBits(beam.restLength));
             hash = mix(hash, Double.doubleToLongBits(beam.plasticStrain));
+            hash = mix(hash, Double.doubleToLongBits(beam.beamStrength));
+            hash = mix(hash, Double.doubleToLongBits(beam.maxPosStress));
+            hash = mix(hash, Double.doubleToLongBits(beam.maxNegStress));
+            hash = mix(hash, Double.doubleToLongBits(beam.foldAccum));
+            hash = mix(hash, beam.foldEvents);
         }
         for (SoftTriangle triangle : triangles) {
             hash = mix(hash, triangle.broken ? 1L : 0L);

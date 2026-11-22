@@ -111,8 +111,16 @@ public final class VehicleBody {
                     // anchor made the whole shell read as one welded block.
                     // 95 kN/m lets the body pitch/settle a few centimetres on
                     // impact while the spawn settle test stays flat.
-                    node.anchorStiffness = 95_000.0;
-                    node.anchorDamping = 520.0;
+                    // The cab band sits directly behind the hood.  Anchoring it
+                    // at the chassis stiffness made the windscreen frame and
+                    // the whole observation-window area read as one welded
+                    // block.  30 kN/m lets that band collapse 15-20 % and then
+                    // settle, instead of ignoring the hit entirely.
+                    double cabBandStart = this.front
+                            - Math.max(1.0, this.front - this.rear) * 0.62;
+                    boolean cabBand = "body".equals(node.group0) && x > cabBandStart;
+                    node.anchorStiffness = cabBand ? 30_000.0 : 95_000.0;
+                    node.anchorDamping = cabBand ? 760.0 : 520.0;
                     this.world.addNode(node);
                 }
             }
@@ -232,7 +240,7 @@ public final class VehicleBody {
         // plastic flow as the hand-authored T15 map instead of the old 0.35
         // defaults, otherwise a soft spring yields for one frame and then
         // locks because the rest length barely moves.
-        beam.plasticityRate = 0.45;
+        beam.plasticityRate = 0.42;
         beam.deformLimit = 1.0;
 
         double cx = (a.rest.x + b.rest.x) * 0.5;
@@ -251,7 +259,7 @@ public final class VehicleBody {
             beam.beamDamp = 145.0;
             beam.beamStrength = 32_000.0;
             beam.beamDeform = 1_200.0 + frontYieldJitter(a, b);
-            beam.plasticityRate = 0.45;
+            beam.plasticityRate = 0.60;
             // Discrete fold events: ~4.5 cm per buckle, then +0.4 kN local
             // hardening.  Only the front crush group uses this; chassis and
             // suspension beams keep the continuous plastic model.

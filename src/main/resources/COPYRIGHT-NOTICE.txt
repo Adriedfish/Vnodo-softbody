@@ -1,0 +1,17 @@
+Vnodo — Copyright & Attribution Notice
+
+Copyright (c) 2026 Adriedfish / Vnodo contributors.
+
+This file, LICENSE.txt, and the copyright/attribution notice in README.md and
+CHANGELOG.md are part of the distributed work. They must be included in every
+redistribution, modpack, mirror, fork, and derivative version.
+
+DO NOT REMOVE THIS FILE OR THE COPYRIGHT NOTICE.
+不得删除本文件或版权说明。
+
+Removing, hiding, replacing, or stripping this file or the attribution notice
+is a violation of the attribution requirement and the license terms. If you
+modify Vnodo, keep this file and state clearly what you changed.
+
+License: CC BY-NC-SA 4.0
+https://creativecommons.org/licenses/by-nc-sa/4.0/
