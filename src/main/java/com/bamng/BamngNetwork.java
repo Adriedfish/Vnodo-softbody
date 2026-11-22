@@ -88,7 +88,6 @@ public final class BamngNetwork {
             if (player != null && player.level().getEntity(this.entityId)
                     instanceof com.antaurora.vettura.vehicle.PickupTruckEntity truck
                     && truck.isAlive()
-                    && BamngSpawnerItem.isSoft(truck)
                     && player.distanceToSqr(truck) <= 64.0 * 64.0) {
                 for (int pane = 0; pane < 4; pane++) {
                     if ((this.mask & (1 << pane)) != 0) {
@@ -115,7 +114,8 @@ public final class BamngNetwork {
         public void handle(Supplier<NetworkEvent.Context> supplier) {
             NetworkEvent.Context context = supplier.get();
             ServerPlayer player = context.getSender();
-            if (player != null && player.level().getEntity(this.entityId) instanceof SoftBodyVehicleEntity truck) {
+            if (player != null && player.level().getEntity(this.entityId) instanceof SoftBodyVehicleEntity truck
+                    && player.getVehicle() == truck) {
                 truck.acceptDrive(this.throttle, this.brake, this.steer);
             }
             context.setPacketHandled(true);
@@ -162,17 +162,39 @@ public final class BamngNetwork {
             NetworkEvent.Context context = supplier.get();
             ServerPlayer player = context.getSender();
             if (player != null) {
-                boolean owned = false;
-                for (PickupTruckEntity truck : player.level().getEntitiesOfClass(
+                PickupTruckEntity target = null;
+                for (PickupTruckEntity candidate : player.level().getEntitiesOfClass(
                         PickupTruckEntity.class, player.getBoundingBox().inflate(64.0),
                         candidate -> candidate.isAlive()
-                                && candidate.getUUID().equals(this.uuid)
-                                && BamngSpawnerItem.isSoft(candidate))) {
-                    owned = true;
+                                && candidate.getUUID().equals(this.uuid))) {
+                    target = candidate;
                     break;
                 }
-                if (owned) {
-                    context.enqueueWork(() -> VnodoServerField.put(this.uuid, this.version, this.field));
+                if (target != null) {
+                    int expected = target.damage().frame().cell.length * 3;
+                    boolean clear = this.field == null || this.field.length == 0;
+                    boolean sized = this.field != null && this.field.length == expected;
+                    boolean versioned = clear ? this.version == 0
+                            : this.version >= 1_000_000;
+                    // Only the player currently driving the truck may publish
+                    // a non-empty crush field while it is occupied.  A nearby
+                    // player used to be able to spoof any correctly-sized
+                    // field for a truck they were not in; clearing is allowed
+                    // from anyone nearby so a logout/removal can always
+                    // release the server shadow.  An empty truck still accepts
+                    // a nearby client's field because that client owns the
+                    // only soft shell currently simulating it.
+                    boolean driven = player.getVehicle() == target;
+                    boolean emptyNear = target.getFirstPassenger() == null
+                            && player.distanceToSqr(target) <= 24.0 * 24.0;
+                    if ((clear || (sized && (driven || emptyNear))) && versioned
+                            && (clear || expected > 0)) {
+                        final PickupTruckEntity matched = target;
+                        final float[] incoming = this.field == null ? new float[0] : this.field;
+                        final int expectedLength = expected;
+                        context.enqueueWork(() -> VnodoServerField.put(matched.getUUID(),
+                                this.version, incoming, expectedLength));
+                    }
                 }
             }
             context.setPacketHandled(true);

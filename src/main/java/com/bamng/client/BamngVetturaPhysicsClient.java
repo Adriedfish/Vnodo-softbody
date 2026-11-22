@@ -147,14 +147,6 @@ public final class BamngVetturaPhysicsClient {
     }
 
     /** Flush every attached shell before the client loses its level. */
-    private static void saveAllShells(boolean force) {
-        for (Map.Entry<PickupTruckEntity, SoftRuntime> entry : RUNTIMES.entrySet()) {
-            if (entry.getKey() != null && entry.getValue() != null) {
-                entry.getValue().saveState(entry.getKey(), force);
-            }
-        }
-    }
-
     public static boolean isActive(PickupTruckEntity truck) {
         return VnodoConfig.enabled()
                 && "vnodo".equals(VnodoConfig.source())
@@ -168,18 +160,20 @@ public final class BamngVetturaPhysicsClient {
      * alive, so switching to Vettura's own shell still fed the old soft hull
      * into collision and teleported/knocked trucks on the next spawn.
      */
+    private static void releaseShell(PickupTruckEntity truck, SoftRuntime runtime) {
+        if (truck == null || runtime == null) {
+            return;
+        }
+        runtime.saveState(truck, true);
+        if (Minecraft.getInstance().getConnection() != null) {
+            BamngNetwork.sendCollisionField(truck.getUUID(), 0, new float[0]);
+        }
+        BamngRenderState.reset(truck);
+    }
+
     private static void releaseAllShells() {
         for (Map.Entry<PickupTruckEntity, SoftRuntime> entry : RUNTIMES.entrySet()) {
-            PickupTruckEntity truck = entry.getKey();
-            SoftRuntime runtime = entry.getValue();
-            if (truck == null || runtime == null) {
-                continue;
-            }
-            runtime.saveState(truck, true);
-            if (Minecraft.getInstance().getConnection() != null) {
-                BamngNetwork.sendCollisionField(truck.getUUID(), 0, new float[0]);
-            }
-            BamngRenderState.reset(truck);
+            releaseShell(entry.getKey(), entry.getValue());
         }
         RUNTIMES.clear();
     }
@@ -188,8 +182,9 @@ public final class BamngVetturaPhysicsClient {
     public static void onLoggingOut(ClientPlayerNetworkEvent.LoggingOut event) {
         // Fired before the client drops the level/entities on disconnect.
         // This is the reliable last chance to write a crash shape that was
-        // still inside its one-second periodic save window.
-        saveAllShells(true);
+        // still inside its one-second periodic save window, and to clear the
+        // server shadow and render skin before the level reference disappears.
+        releaseAllShells();
     }
 
     @SubscribeEvent
@@ -214,8 +209,9 @@ public final class BamngVetturaPhysicsClient {
         LocalPlayer player = minecraft.player;
         if (player == null || minecraft.level == null) {
             // World exit / title screen: the entity may still be alive for a
-            // tick, so this is the last safe point to flush the shell.
-            saveAllShells(true);
+            // tick, so this is the last safe point to flush the shell and
+            // release its server shadow and render skin.
+            releaseAllShells();
             return;
         }
         // Dead trucks used to stay in the WeakHashMap until GC, leaving a
@@ -225,7 +221,7 @@ public final class BamngVetturaPhysicsClient {
                     || entry.getKey().isRemoved()
                     || entry.getKey().level() != minecraft.level;
             if (remove && entry.getValue() != null && entry.getKey() != null) {
-                entry.getValue().saveState(entry.getKey(), true);
+                releaseShell(entry.getKey(), entry.getValue());
             }
             return remove;
         });
@@ -241,18 +237,15 @@ public final class BamngVetturaPhysicsClient {
             // All Vettura pickups are soft now.  The previous BamngSoft name /
             // tag gate is why an imported truck (and a bed-mounted spare) was
             // never attached.  The layout/spec are read from the entity below.
-            boolean softVehicle = true;
             if (!riding) {
-                // Build and keep the shell for a BAMNG truck even when nobody
-                // is sitting in it.  Previously the first runtime was only
-                // created on mount, so a freshly spawned truck had no soft
-                // surface or collision until the player got in.
+                // Build and keep the shell for a Vettura pickup even when
+                // nobody is sitting in it.  Previously the first runtime was
+                // only created on mount, so a freshly spawned truck had no
+                // soft surface or collision until the player got in.
                 if (player.distanceToSqr(truck) > 24.0 * 24.0) {
                     continue;
                 }
-                if (!softVehicle && !RUNTIMES.containsKey(truck)) {
-                    continue;
-                }            }
+            }
             float throttle = riding && player.input.up ? 1.0F : 0.0F;
             float brake = riding && player.input.down ? 1.0F : 0.0F;
             float steer = riding ? (player.input.left ? 1.0F : 0.0F) - (player.input.right ? 1.0F : 0.0F) : 0.0F;
@@ -558,7 +551,7 @@ public final class BamngVetturaPhysicsClient {
             this.prevSpeed = teleported ? 0.0 : speed;
 
             if (this.settleTicks <= 0) {
-                this.applyImpacts(physics);
+                this.applyImpacts(physics, truck, speed, windowDrop);
             }
 
             this.body.world.throttle = 0.0;
@@ -801,7 +794,6 @@ public final class BamngVetturaPhysicsClient {
             if (this.settleTicks > 0) {
                 this.settleTicks--;
                 if (this.settleTicks == 0) {
-                    this.captureRestBounds();
                     this.impact = 0.0F;
                     // The settle window may have contained a large spawn
                     // correction.  Do not carry it into the first armed tick.
@@ -1444,6 +1436,23 @@ public final class BamngVetturaPhysicsClient {
             this.frontCrashDepth = savedFront;
             this.rearCrashDepth = savedRear;
             this.crashDent = 0.0;
+            // Plastic is stored in world axes.  If the truck was parked at a
+            // different yaw when the snapshot was written, rotate the saved
+            // offsets back into the current body frame before rebuilding
+            // positions; otherwise a turned truck reloads its dent on the
+            // wrong side.  Legacy saves without Yaw keep the old behaviour.
+            double savedYaw = VnodoSoftStateStore.savedYaw(tag);
+            if (Double.isFinite(savedYaw)) {
+                double plasticAngle = Math.toRadians(-(truck.getYRot() - savedYaw));
+                double plasticCos = Math.cos(plasticAngle);
+                double plasticSin = Math.sin(plasticAngle);
+                for (SoftNode node : this.body.world.nodes) {
+                    double px = node.plasticX;
+                    double pz = node.plasticZ;
+                    node.plasticX = px * plasticCos + pz * plasticSin;
+                    node.plasticZ = -px * plasticSin + pz * plasticCos;
+                }
+            }
             double maxPlastic = 0.0;
             double maxFront = 0.0;
             for (SoftNode node : this.body.world.nodes) {
@@ -1515,7 +1524,8 @@ public final class BamngVetturaPhysicsClient {
             }
             try {
                 CompoundTag tag = VnodoSoftStateStore.makeTag(
-                        this.body.world, this.frontCrashDepth, this.rearCrashDepth);
+                        this.body.world, this.frontCrashDepth, this.rearCrashDepth,
+                        truck.getYRot());
                 VnodoSoftStateStore.write(truck, tag);
                 this.lastSavedStateHash = hash;
             } catch (java.io.IOException | RuntimeException error) {
@@ -1596,12 +1606,37 @@ public final class BamngVetturaPhysicsClient {
             return this.body.envelope;
         }
 
-        private void applyImpacts(VehiclePhysics physics) {
+        private void applyImpacts(VehiclePhysics physics, PickupTruckEntity truck,
+                                  double speed, double windowDrop) {
             if (physics.hits.isEmpty()) {
                 return;
             }
+            boolean entityDamageArmed = false;
             com.bamng.core.Vec3 center = this.body.world.center();
             for (VehiclePhysics.Hit hit : physics.hits) {
+                // Vettura reports every solid contact without a source type.
+                // Vehicle colliders are already handled by resolveBodyPairs;
+                // feeding them here would double-apply the impulse (once for
+                // each body) and shove a pair apart before the soft-soft pass
+                // can write its contact plastic.  Null-source contacts are
+                // phantom and must not move the shell.
+                Object other = hit.other;
+                if (other == null || other == truck
+                        || other instanceof com.antaurora.vettura.vehicle.VehicleColliders.Collider) {
+                    continue;
+                }
+                // Block contacts already enter through the wall-crush path
+                // above.  An entity hit is the non-wall case: arm the same
+                // damage window from its absorbed impulse so a truck-to-mob /
+                // truck-to-player hit fractures and folds instead of only
+                // pushing nodes around.
+                if (!entityDamageArmed && other instanceof net.minecraft.world.entity.Entity
+                        && Math.abs(hit.jx) + Math.abs(hit.jy) + Math.abs(hit.jz) > 4.0) {
+                    double loss = Math.max(windowDrop,
+                            Math.min(27.8, (Math.abs(hit.jx) + Math.abs(hit.jy) + Math.abs(hit.jz)) * 0.02));
+                    this.registerCrash(speed, loss);
+                    entityDamageArmed = true;
+                }
                 double hx = hit.x;
                 double hy = hit.y;
                 double hz = hit.z;
@@ -1683,23 +1718,6 @@ public final class BamngVetturaPhysicsClient {
             return max;
         }
 
-        private void captureRestBounds() {
-            double minX = Double.POSITIVE_INFINITY;
-            double minY = Double.POSITIVE_INFINITY;
-            double minZ = Double.POSITIVE_INFINITY;
-            double maxX = Double.NEGATIVE_INFINITY;
-            double maxY = Double.NEGATIVE_INFINITY;
-            double maxZ = Double.NEGATIVE_INFINITY;
-            for (SoftNode node : this.body.world.nodes) {
-                minX = Math.min(minX, node.position.x);
-                minY = Math.min(minY, node.position.y);
-                minZ = Math.min(minZ, node.position.z);
-                maxX = Math.max(maxX, node.position.x);
-                maxY = Math.max(maxY, node.position.y);
-                maxZ = Math.max(maxZ, node.position.z);
-            }
-        }
-
         private void init(PickupTruckEntity truck, VehiclePhysics physics) {            // Vettura's life, part-loss and hood/tailgate state are now
             // authoritative.  Do not repair the truck or clear its hinge
             // angles when the Vnodo skin attaches: doing so erased real
@@ -1747,21 +1765,6 @@ public final class BamngVetturaPhysicsClient {
             // target pose was written above, so reset() restores a clean shell
             // instead of keeping the 1,700 broken beams seen at attach.
             this.body.world.reset();
-            double minX = Double.POSITIVE_INFINITY;
-            double minY = Double.POSITIVE_INFINITY;
-            double minZ = Double.POSITIVE_INFINITY;
-            double maxX = Double.NEGATIVE_INFINITY;
-            double maxY = Double.NEGATIVE_INFINITY;
-            double maxZ = Double.NEGATIVE_INFINITY;
-            for (SoftNode node : this.body.world.nodes) {
-                minX = Math.min(minX, node.position.x);
-                minY = Math.min(minY, node.position.y);
-                minZ = Math.min(minZ, node.position.z);
-                maxX = Math.max(maxX, node.position.x);
-                maxY = Math.max(maxY, node.position.y);
-                maxZ = Math.max(maxZ, node.position.z);
-            }
-            this.captureRestBounds();
             this.body.world.damage.registerTriangles(this.body.world.triangles, this.body.world.nodeArray());
             BamngRenderState.capture(truck, this.body.world.nodes,
                     truck.getX(), truck.getY(), truck.getZ(), truck.getYRot());

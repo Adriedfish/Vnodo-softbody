@@ -23,12 +23,36 @@ public final class VnodoServerField {
     }
 
     public static void put(UUID uuid, int version, float[] field) {
+        put(uuid, version, field, 0);
+    }
+
+    /**
+     * Store a field only when its shape matches the receiving truck's crush
+     * frame.  The expected length is supplied by the network handler from the
+     * server-side VehicleDamage frame; zero means "unknown, keep legacy
+     * behaviour" for direct probe/tests.
+     */
+    public static void put(UUID uuid, int version, float[] field, int expectedLength) {
         if (uuid == null) {
             return;
         }
         if (field == null || field.length == 0) {
             FIELDS.remove(uuid);
             return;
+        }
+        // Vnodo's field namespace starts at 1,000,003 so it can never alias
+        // Vettura's own low crushVersion values.  A non-empty field outside
+        // that namespace is not one of ours.
+        if (version < 1_000_000) {
+            return;
+        }
+        if (expectedLength > 0 && field.length != expectedLength) {
+            return;
+        }
+        for (float value : field) {
+            if (!Float.isFinite(value)) {
+                return;
+            }
         }
         FIELDS.put(uuid, new Entry(version, field.clone()));
     }

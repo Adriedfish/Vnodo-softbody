@@ -60,7 +60,11 @@ public class SoftBodyVehicleEntity extends Entity {
         }
 
         if (this.level().isClientSide) {
+            // The client only collects input; the authoritative soft-body
+            // step runs on the server.  Running both made the old entity
+            // simulate twice and drift away from its synced transform.
             this.clientControls();
+            return;
         }
 
         this.body.world.throttle = this.throttle;
@@ -85,7 +89,12 @@ public class SoftBodyVehicleEntity extends Entity {
         for (SoftNode node : this.body.world.nodes) {
             node.position.add(x, y, z);
             node.previous.set(node.position);
-            node.rest.set(node.position);
+            // Keep node.rest as the authored body-local shape.  The old code
+            // overwrote it with world coordinates, which destroyed the model
+            // frame and made the anchor pull every node toward the origin.
+            node.targetX = node.position.x;
+            node.targetY = node.position.y;
+            node.targetZ = node.position.z;
         }
         this.setPos(x, this.baseEntityY, z);
         this.initialized = true;

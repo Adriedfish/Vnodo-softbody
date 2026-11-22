@@ -16,6 +16,7 @@ Node-based soft-body crash addon for Vettura pickup trucks: persistent panel def
 - 设置页恢复 `default / soft / hard` 三个预设和 7 个区域滑条，拖动即时生效。
 - 旧 0.7.0 的 hard 配置首次加载会自动迁移到新 default，不需要删配置。
 - 包含 auditfix2 的软-软碰撞法线刷新和读档尾部压溃上限修复。
+- 审计收尾：存档补朝向、统一释放链路、碰撞场长度/版本/有限值校验、服务端统一接管 Vettura pickup、遗留实体单端步进、实体命中独立损伤窗口，并清掉三处死代码。
 
 ---
 

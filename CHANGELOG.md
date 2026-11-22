@@ -10,6 +10,7 @@
 - 包含 auditfix2 两条 P2：软-软车对碰撞前刷新对方未破三角形法线；读档先恢复前后压溃上限再夹塑料，尾部 0.46 m 不再回落到 0.34 m。
 - 顺带修复 `BamngPlayerCollision` 日志参数多传，以及 `VnodoServerField.put` 空 UUID 的 NPE。
 - 文档与版权：新增 `COPYRIGHT-NOTICE.txt`，README/LICENSE 明确要求再分发、整合包、镜像、分支和衍生版本不得删除版权说明文件与署名段落。
+- 审计收尾（9 项）：存档快照补 `Yaw` 并在读档时按当前朝向旋转塑性位移；退出/切源/实体移除统一走 `releaseShell`，释放碰撞场与渲染状态；碰撞场增加长度、版本、有限值校验；服务端去掉 Vettura pickup 的 `isSoft` 门控；遗留 `SoftBodyVehicleEntity` 只在服务端物理步进，保留 authored rest，并校验驾驶者归属；`applyImpacts` 跳过车辆/空来源命中，对实体命中单独开启损伤窗口；删除 `captureRestBounds()`、`saveAllShells()` 和 `sweepRigidFollow.bestSign` 死代码。
 
 ### English
 
@@ -19,6 +20,7 @@
 - Includes the two auditfix2 P2 fixes: foreign soft-body triangles are refreshed before the narrow phase, and saved front/rear crush limits are restored before plastic capping so a 0.46 m rear crush no longer falls back to 0.34 m.
 - Also fixes the extra `BamngPlayerCollision` log argument and the null-UUID NPE in `VnodoServerField.put`.
 - Docs & copyright: added `COPYRIGHT-NOTICE.txt`; README/LICENSE now state that redistributions, modpacks, mirrors, forks, and derivative versions must not remove the copyright notice or attribution paragraphs.
+- Audit close-out (9 items): snapshots now store `Yaw` and rotate plastic offsets to the current heading on load; logout/source-switch/entity removal all go through `releaseShell`, clearing the collision field and render state; the collision field validates length, version and finite values; the server-side `isSoft` gate is gone for Vettura pickups; the legacy `SoftBodyVehicleEntity` only steps on the server, keeps authored rest, and validates the driver; `applyImpacts` skips vehicle/null sources and arms a separate damage window for entity hits; removed the dead `captureRestBounds()`, `saveAllShells()` and `sweepRigidFollow.bestSign`.
 
 ## 0.7.0-beta-hotfix3 (2026-11-22)
 

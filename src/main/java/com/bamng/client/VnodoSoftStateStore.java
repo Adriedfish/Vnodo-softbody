@@ -35,6 +35,7 @@ public final class VnodoSoftStateStore {
     private static final String KEY_SOFT = "Soft";
     private static final String KEY_FRONT = "FrontDepth";
     private static final String KEY_REAR = "RearDepth";
+    private static final String KEY_YAW = "Yaw";
     private static final Map<UUID, String> LAST_DIMENSIONS = new HashMap<>();
     private static String lastWorldName = "remote";
 
@@ -138,11 +139,12 @@ public final class VnodoSoftStateStore {
     }
 
     public static CompoundTag makeTag(SoftBodyWorld world, double frontDepth,
-                                      double rearDepth) throws IOException {
+                                      double rearDepth, float yaw) throws IOException {
         CompoundTag tag = new CompoundTag();
         tag.putByteArray(KEY_SOFT, com.bamng.core.SoftBodySnapshot.saveVehicleState(world));
         tag.putDouble(KEY_FRONT, frontDepth);
         tag.putDouble(KEY_REAR, rearDepth);
+        tag.putDouble(KEY_YAW, yaw);
         return tag;
     }
 
@@ -152,6 +154,11 @@ public final class VnodoSoftStateStore {
 
     public static double rearDepth(CompoundTag tag) {
         return tag == null ? 0.0 : tag.getDouble(KEY_REAR);
+    }
+
+    /** Saved body yaw; NaN means a pre-yaw save that must keep its old axes. */
+    public static double savedYaw(CompoundTag tag) {
+        return tag == null || !tag.contains(KEY_YAW) ? Double.NaN : tag.getDouble(KEY_YAW);
     }
 
     public static byte[] softBytes(CompoundTag tag) {

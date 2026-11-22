@@ -1058,7 +1058,6 @@ public final class SoftBodyWorld {
         double r = node.radius + CONTACT_THICKNESS;
         double bestT = 1.0;
         int bestAxis = -1;
-        double bestSign = 0.0;
         for (CollisionBox box : this.collisionBoxes) {
             if (box.maxY <= this.groundY + 0.20) {
                 continue;
@@ -1072,7 +1071,6 @@ public final class SoftBodyWorld {
             double t0 = 0.0;
             double t1 = 1.0;
             int axis = -1;
-            double sign = 0.0;
 
             double tNear;
             double tFar;
@@ -1084,7 +1082,7 @@ public final class SoftBodyWorld {
                 tNear = (minX - node.position.x) / dx;
                 tFar = (maxX - node.position.x) / dx;
                 if (tNear > tFar) { double tmp = tNear; tNear = tFar; tFar = tmp; }
-                if (tNear > t0) { t0 = tNear; axis = 0; sign = dx > 0.0 ? -1.0 : 1.0; }
+                if (tNear > t0) { t0 = tNear; axis = 0; }
                 if (tFar < t1) { t1 = tFar; }
                 if (t0 > t1) { continue; }
             }
@@ -1096,7 +1094,7 @@ public final class SoftBodyWorld {
                 tNear = (minY - node.position.y) / dy;
                 tFar = (maxY - node.position.y) / dy;
                 if (tNear > tFar) { double tmp = tNear; tNear = tFar; tFar = tmp; }
-                if (tNear > t0) { t0 = tNear; axis = 1; sign = dy > 0.0 ? -1.0 : 1.0; }
+                if (tNear > t0) { t0 = tNear; axis = 1; }
                 if (tFar < t1) { t1 = tFar; }
                 if (t0 > t1) { continue; }
             }
@@ -1108,7 +1106,7 @@ public final class SoftBodyWorld {
                 tNear = (minZ - node.position.z) / dz;
                 tFar = (maxZ - node.position.z) / dz;
                 if (tNear > tFar) { double tmp = tNear; tNear = tFar; tFar = tmp; }
-                if (tNear > t0) { t0 = tNear; axis = 2; sign = dz > 0.0 ? -1.0 : 1.0; }
+                if (tNear > t0) { t0 = tNear; axis = 2; }
                 if (tFar < t1) { t1 = tFar; }
                 if (t0 > t1) { continue; }
             }
@@ -1117,7 +1115,6 @@ public final class SoftBodyWorld {
             if (axis >= 0 && t0 > 1.0e-6 && t0 < bestT) {
                 bestT = t0;
                 bestAxis = axis;
-                bestSign = sign;
             }
         }
         if (bestAxis < 0) {

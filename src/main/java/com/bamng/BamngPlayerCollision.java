@@ -72,7 +72,7 @@ public final class BamngPlayerCollision {
     }
 
     private static void collideTruck(ServerLevel level, PickupTruckEntity truck, int tick) {
-        if (!truck.isAlive() || truck.isRemoved() || !BamngSpawnerItem.isSoft(truck)) {
+        if (!truck.isAlive() || truck.isRemoved()) {
             LAST_TRUCK_POS.remove(truck.getUUID());
             LAST_TRUCK_SPEED.remove(truck.getUUID());
             return;
