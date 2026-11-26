@@ -79,3 +79,15 @@ CC BY-NC-SA 4.0。允许免费使用、学习、修改、二次开发、收录�
 ## 致谢
 
 - [Vettura](https://www.curseforge.com/minecraft/mc-mods/vettura) 与 [Vextris](https://www.curseforge.com/minecraft/mc-mods/vextris)，作者 Antaurora。本模组是它们之上的第三方附属，不包含它们的任何代码或资源。
+
+### 功能与格式参考
+
+以下项目用于功能对标、格式研究或工具链参考；当前版本未直接包含其源代码。实际引入的第三方代码与许可证会逐项记录在 `THIRD_PARTY_NOTICES.md`。
+
+- [Rigs of Rods](https://github.com/RigsOfRods/rigs-of-rods)（GPL-3.0）：节点/梁、三角化、机盖/车门/保险杠可开可掉的 flexbody 做法，以及 `submesh` / `contacters` / `detacher` 的功能参考。未复制代码。
+- [BeamNG Blender JBeam Editor](https://github.com/BeamNG/Blender-JBeam-Editor)（MIT）：JBeam 格式、整车子 `.pc` 导入和节点/梁/三角编辑的解析参考。
+- [Jolt Physics](https://github.com/jrouwe/JoltPhysics) / [Jolt JNI](https://github.com/stephengold/jolt-jni)（MIT）：碰撞、约束和软体后端参考。
+- [BlockPhysics](https://github.com/emortaldev/BlockPhysics)（MIT）：Minecraft 侧 Jolt 初始化、对象层、射线和接触监听参考。
+- [FoxPhysic](https://github.com/Atimenka/FoxPhysic)（MIT）：XPBD 软体、自碰撞、撕裂、命令和公共 API 参考。
+- [beamng-lan-multiplayer](https://github.com/L1ttleWizard/beamng-lan-multiplayer)（未提供许可证）：损伤增量同步、ghost mode 和 reset 的功能参考。未复制代码。
+- [BeamNGpy](https://github.com/BeamNG/BeamNGpy)（MIT）：自动碰撞测试与传感器工具参考。
